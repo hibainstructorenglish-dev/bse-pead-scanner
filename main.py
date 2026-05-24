@@ -18,7 +18,7 @@ from google.genai import types
 # =========================================================
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
-GEMINI_API_KEY = "YOUR_GEMINI_KEY" # <-- REPLACE WITH YOUR SECURE KEY
+GEMINI_API_KEY = "AIzaSyBk7jqnuiuZ0yfX3UlFniuDNKG8KQqk_6U" # <-- REPLACE WITH YOUR SECURE KEY
 
 DB_NAME = "bse_results.db"
 BASE_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
