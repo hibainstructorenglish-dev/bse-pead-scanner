@@ -3,3 +3,4 @@ openai
 yfinance
 flask
 pdfplumber
+pandas
