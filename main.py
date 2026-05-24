@@ -198,9 +198,9 @@ def ai_worker_loop():
         try:
             tech_data = get_technical_data(scrip)
             
-            if tech_data and tech_data.get("mcap_cr", 0) < 100:
+            if tech_data and tech_data.get("mcap_cr", 0) < 500:
                 print(f"[REJECTED] {company} is a Microcap. Skipping.")
-                continue
+                #continue
             
             pdf_bytes = None
             if pdf_url != "No PDF":
