@@ -19,10 +19,10 @@ from openai import OpenAI
 # =========================================================
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
-# Best Practice: Pull from Render Env Vars, fallback to string if local
-# The script will look for the key in Render's secure vault
-OPENAI_API_KEY = os.environ.get("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
-")
+
+# Hardcoded API Key for Private Repo. KEEP THIS ON ONE SINGLE LINE!
+OPENAI_API_KEY = "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"
+
 DB_NAME = "bse_results.db"
 BASE_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
 
