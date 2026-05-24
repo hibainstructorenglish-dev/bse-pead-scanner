@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import time
 import sqlite3
@@ -6,6 +7,7 @@ import tempfile
 import requests
 import threading
 import yfinance as yf
+import pdfplumber
 from flask import Flask
 from queue import Queue
 from datetime import datetime
@@ -18,7 +20,7 @@ from google.genai import types
 # =========================================================
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
-GEMINI_API_KEY = "AIzaSyBk7jqnuiuZ0yfX3UlFniuDNKG8KQqk_6U" # <-- REPLACE WITH YOUR SECURE KEY
+GEMINI_API_KEY = "YOUR_GEMINI_KEY" # <-- REPLACE WITH YOUR SECURE KEY
 
 DB_NAME = "bse_results.db"
 BASE_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
@@ -32,7 +34,7 @@ HEADERS = {
 print("Initializing Gemini Client...", flush=True)
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# FIX 1: BOUNDED QUEUE to prevent infinite memory growth during outages
+# BOUNDED QUEUE: Prevents memory leaks during network/AI outages
 analysis_queue = Queue(maxsize=100)
 
 # =========================================================
@@ -42,7 +44,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "BSE PEAD Scanner is Alive and Running!", 200
+    return "BSE Hybrid PEAD Scanner is Alive and Running!", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -102,7 +104,49 @@ def create_session():
         return None
 
 # =========================================================
-# QUANTITATIVE SCORING ENGINE
+# QUANTITATIVE LAYER 1: LOCAL DETERMINISTIC PARSER
+# =========================================================
+def extract_financials_locally(pdf_path):
+    """
+    Lightning-fast regex extraction using pdfplumber.
+    Costs $0 and takes milliseconds.
+    """
+    extracted = {
+        "revenue_cr": 0.0,
+        "pat_cr": 0.0,
+        "found": False
+    }
+    
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            text = ""
+            # Only scan the first 4 pages to maximize speed
+            for page in pdf.pages[:4]:
+                text += page.extract_text() + "\n"
+                
+            rev_match = re.search(r"(?:Total Income|Revenue from operations)[\s\S]{1,50}?([\d,]+\.\d+)", text, re.IGNORECASE)
+            pat_match = re.search(r"(?:Profit for the period|Profit after tax|Net Profit)[\s\S]{1,50}?([\d,]+\.\d+)", text, re.IGNORECASE)
+            
+            if rev_match and pat_match:
+                rev_val = float(rev_match.group(1).replace(",", ""))
+                pat_val = float(pat_match.group(1).replace(",", ""))
+                
+                # Auto-convert Lakhs to Crores if number is massive
+                if rev_val > 5000: 
+                    rev_val = rev_val / 100
+                    pat_val = pat_val / 100
+                    
+                extracted["revenue_cr"] = rev_val
+                extracted["pat_cr"] = pat_val
+                extracted["found"] = True
+                
+    except Exception as e:
+        print(f"[LOCAL PARSE ERROR] {e}", flush=True)
+        
+    return extracted
+
+# =========================================================
+# QUANTITATIVE LAYER 2: MOMENTUM & SCORING
 # =========================================================
 def get_technical_data(scrip):
     try:
@@ -128,50 +172,8 @@ def get_technical_data(scrip):
         print(f"YFinance Error for {scrip}: {e}", flush=True)
         return None
 
-def calculate_advanced_pead_score(data, tech_data, company_name):
-    score = 0
-    flags = []
-    
-    if tech_data and tech_data.get("mcap_cr", 0) < 500:
-        return -100, "❌ MICROCAP NOISE (< ₹500Cr) - SKIPPING"
-
-    if data and data.get('consolidated'):
-        c = data['consolidated']
-        pat_yoy = c.get('pat_yoy_pct', 0)
-        pat_qoq = c.get('pat_qoq_pct', 0)
-        rev_yoy = c.get('revenue_yoy_pct', 0)
-        margin = c.get('ebitda_margin_pct', 0)
-
-        if pat_yoy > 40:
-            score += 20
-            flags.append("🔥 Massive YoY Profit Beat")
-        if pat_qoq > 15:
-            score += 15
-            flags.append("⚡ Strong QoQ Acceleration")
-        if rev_yoy > 20:
-            score += 10
-            flags.append("📈 Topline Expansion")
-        if margin > 15:
-            score += 5
-            flags.append("💎 High Margin Business")
-
-    if tech_data:
-        if tech_data.get("above_200dma"):
-            score += 10
-            flags.append("🐂 Long-Term Uptrend (Above 200 DMA)")
-        if tech_data.get("vol_surge"):
-            score += 15
-            flags.append("🌊 Institutional Volume Surge (>2x Avg)")
-
-    power_defense_keywords = ["POWER", "ENERGY", "DEFENCE", "AERO", "INFRA", "TRANSFORMER"]
-    if any(word in company_name.upper() for word in power_defense_keywords):
-        score = int(score * 1.5)
-        flags.insert(0, "🛡️ [HIGH-PRIORITY SECTOR]")
-
-    return score, "\n".join(flags)
-
 # =========================================================
-# AI WORKER (CONSUMER THREAD)
+# AI WORKER (CONSUMER THREAD - THE HYBRID PIPELINE)
 # =========================================================
 def ai_worker_loop():
     session = create_session()
@@ -184,103 +186,136 @@ def ai_worker_loop():
         pdf_url = item.get("PDF_URL")
         temp_pdf_path = None
         
-        print(f"\n[AI WORKER] Analyzing {company}...", flush=True)
+        print(f"\n[PIPELINE] Processing {company}...", flush=True)
         
         try:
+            # 1. Fetch Technicals
             tech_data = get_technical_data(scrip)
             
+            # Reject Microcaps instantly (saves bandwidth and CPU)
+            if tech_data and tech_data.get("mcap_cr", 0) < 500:
+                print(f"[REJECTED] {company} is a Microcap (< ₹500Cr). Skipping.")
+                analysis_queue.task_done()
+                continue
+            
+            # 2. Download PDF Robustly
             pdf_bytes = None
             if pdf_url != "No PDF":
-                resp = session.get(pdf_url, stream=True, timeout=10)
-                resp.raise_for_status() # FIX 4: Explicit status check
+                resp = session.get(pdf_url, stream=True, timeout=15)
+                resp.raise_for_status() # Catches 403s and empty HTML blocks
                 pdf_bytes = resp.content
 
-            extracted_data = None
-            if pdf_bytes:
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-                    temp_pdf.write(pdf_bytes)
-                    temp_pdf_path = temp_pdf.name
+            if not pdf_bytes:
+                raise ValueError("Empty PDF Bytes")
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
+                temp_pdf.write(pdf_bytes)
+                temp_pdf_path = temp_pdf.name
+            
+            # 3. Layer 1: Fast Local Parse
+            local_data = extract_financials_locally(temp_pdf_path)
+            gemini_insights = ""
+            
+            if local_data["found"]:
+                print(f"   -> Local Parse Success! PAT: ₹{local_data['pat_cr']:.2f} Cr")
                 
-                try:
-                    json_schema = {
-                        "type": "OBJECT",
-                        "properties": {
-                            "consolidated": {
-                                "type": "OBJECT",
-                                "properties": {
-                                    "revenue_cr": {"type": "NUMBER"},
-                                    "revenue_yoy_pct": {"type": "NUMBER"},
-                                    "revenue_qoq_pct": {"type": "NUMBER"},
-                                    "pat_cr": {"type": "NUMBER"},
-                                    "pat_yoy_pct": {"type": "NUMBER"},
-                                    "pat_qoq_pct": {"type": "NUMBER"},
-                                    "ebitda_margin_pct": {"type": "NUMBER"}
-                                }
-                            }
-                        }
-                    }
-                        
+                # Layer 2: The Gatekeeper (Defining a "Strong Result")
+                # *Note: As you improve the regex to grab YoY%, update this condition!
+                is_high_priority = (local_data['pat_cr'] > 25.0) and (tech_data and tech_data.get('above_200dma'))
+                
+                # Layer 3: Targeted AI Insights
+                if is_high_priority:
+                    print("   -> 🔥 High Priority! Waking up Gemini for Guidance/Orderbook extraction...")
                     gemini_file = client.files.upload(file=temp_pdf_path, config={'mime_type': 'application/pdf'})
-                    prompt = "Extract financials in Crores. Calculate YoY and QoQ percentages. Extract EBITDA margin percentage."
+                    
+                    prompt = """
+                    You are an expert equity researcher. Scan this PDF and extract only:
+                    1. Management Guidance for the upcoming quarters.
+                    2. Order book size or major contract wins.
+                    3. Capex (capital expenditure) plans.
+                    Be extremely concise. Use bullet points. If not mentioned, state 'Not explicitly mentioned.'
+                    """
                     
                     response = client.models.generate_content(
                         model='gemini-2.0-flash',
                         contents=[gemini_file, prompt],
-                        config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=json_schema, temperature=0.0)
                     )
                     client.files.delete(name=gemini_file.name)
-                    extracted_data = json.loads(response.text)
+                    gemini_insights = f"\n\n🧠 *GEMINI ALPHA INSIGHTS*\n{response.text}"
+                else:
+                    print("   -> Standard result. Bypassing Gemini.")
+            
+            else:
+                # FALLBACK: If PDF is scanned or regex fails, use Gemini as backup parser
+                print("   -> Local Parse Failed. Falling back to Gemini Extraction...")
+                gemini_file = client.files.upload(file=temp_pdf_path, config={'mime_type': 'application/pdf'})
                 
-                finally:
-                    # FIX 5: Guaranteed cleanup even if AI errors out
-                    if temp_pdf_path and os.path.exists(temp_pdf_path):
-                        os.remove(temp_pdf_path)
-
-            score, flags = calculate_advanced_pead_score(extracted_data, tech_data, company)
+                json_schema = {
+                    "type": "OBJECT",
+                    "properties": {
+                        "consolidated": {
+                            "type": "OBJECT",
+                            "properties": {
+                                "revenue_cr": {"type": "NUMBER"},
+                                "pat_cr": {"type": "NUMBER"}
+                            }
+                        }
+                    }
+                }
+                
+                prompt = "Extract financials in Crores."
+                response = client.models.generate_content(
+                    model='gemini-2.0-flash',
+                    contents=[gemini_file, prompt],
+                    config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=json_schema, temperature=0.0)
+                )
+                client.files.delete(name=gemini_file.name)
+                
+                ai_data = json.loads(response.text)
+                if ai_data and ai_data.get('consolidated'):
+                    local_data['revenue_cr'] = ai_data['consolidated'].get('revenue_cr', 0)
+                    local_data['pat_cr'] = ai_data['consolidated'].get('pat_cr', 0)
+                    local_data['found'] = True
             
-            if score == -100:
-                print(f"[REJECTED] {company} is below market cap threshold.")
-                analysis_queue.task_done()
-                continue
-            
+            # 4. Generate Telegram Alert
             msg = f"🚀 *{company}* ({scrip})\n\n"
-            if flags:
-                msg += f"{flags}\n*🧠 PEAD SCORE: {score}/100*\n\n"
-                
-            if extracted_data and extracted_data.get('consolidated'):
-                c = extracted_data['consolidated']
-                msg += f"📊 *METRICS*\n"
-                msg += f"Rev: ₹{c.get('revenue_cr',0):.1f}Cr (YoY: {c.get('revenue_yoy_pct',0):+.1f}%, QoQ: {c.get('revenue_qoq_pct',0):+.1f}%)\n"
-                msg += f"PAT: ₹{c.get('pat_cr',0):.1f}Cr (YoY: {c.get('pat_yoy_pct',0):+.1f}%, QoQ: {c.get('pat_qoq_pct',0):+.1f}%)\n"
-                msg += f"Margin: {c.get('ebitda_margin_pct',0):.1f}%\n\n"
-            
             if tech_data:
-                msg += f"📈 *Mkt Cap:* ₹{tech_data.get('mcap_cr', 0):.0f} Cr\n\n"
+                msg += f"📈 *Mkt Cap:* ₹{tech_data.get('mcap_cr', 0):.0f} Cr\n"
+                if tech_data.get('vol_surge'): msg += f"🌊 Volume Surge Detected\n"
+                
+            if local_data["found"]:
+                msg += f"\n📊 *METRICS (Current Qtr)*\nRev: ₹{local_data['revenue_cr']:.2f} Cr\nPAT: ₹{local_data['pat_cr']:.2f} Cr\n"
             
-            msg += f"[📄 View PDF]({pdf_url})"
+            msg += gemini_insights
+            msg += f"\n[📄 View Original PDF]({pdf_url})"
+            
             send_telegram(msg)
             
         except Exception as e:
             error_str = str(e)
-            print(f"[AI WORKER ERROR] {error_str}", flush=True)
+            print(f"[PIPELINE ERROR] {error_str}", flush=True)
             
             if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                # FIX 3: Bound Retries to prevent infinite loops
                 item["retry_count"] = item.get("retry_count", 0) + 1
                 
                 if item["retry_count"] <= 3:
-                    print(f"⚠️ Hit Gemini Rate Limit! Sleeping for 60 seconds...", flush=True)
+                    print(f"⚠️ Rate Limit! Sleeping 60s... Re-queueing {company} (Attempt {item['retry_count']}/3)", flush=True)
                     time.sleep(60)
-                    print(f"🔄 Re-queueing {company} (Attempt {item['retry_count']}/3)...", flush=True)
                     analysis_queue.put(item)
                 else:
-                    print(f"❌ Max retries reached for {company}. Sending fallback alert.", flush=True)
-                    send_telegram(f"🔔 *{company}* (AI Rate Limit Failed)\n{headline}\n[📄 View PDF]({pdf_url})")
+                    send_telegram(f"🔔 *{company}* (AI Failed)\n{headline}\n[📄 View PDF]({pdf_url})")
             else:
                 send_telegram(f"🔔 *{company}* (System Error)\n{headline}\n[📄 View PDF]({pdf_url})")
             
         finally:
-            time.sleep(5)
+            # Bulletproof cleanup to prevent Ghost Files filling up the server SSD
+            if temp_pdf_path and os.path.exists(temp_pdf_path):
+                try:
+                    os.remove(temp_pdf_path)
+                except:
+                    pass
+            
+            time.sleep(2)
             analysis_queue.task_done()
 
 # =========================================================
@@ -298,7 +333,7 @@ def process_item_fast(conn, item, seen_news):
     
     if item.get("CATEGORYNAME") == "Result":
         item["PDF_URL"] = pdf_url
-        analysis_queue.put(item) # Standard blocking put applies natural backpressure if queue hits 100
+        analysis_queue.put(item) 
     return True
 
 def main():
@@ -310,7 +345,7 @@ def main():
     threading.Thread(target=ai_worker_loop, daemon=True).start()
 
     print("\n" + "=" * 80)
-    print("V4.0 MASTER QUANTITATIVE PEAD ENGINE ONLINE")
+    print("V5.0 HYBRID QUANTITATIVE PEAD ENGINE ONLINE")
     print("=" * 80 + "\n")
 
     while True:
