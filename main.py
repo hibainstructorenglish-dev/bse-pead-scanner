@@ -198,7 +198,7 @@ def ai_worker_loop():
         try:
             tech_data = get_technical_data(scrip)
             
-            if tech_data and tech_data.get("mcap_cr", 0) < 500:
+            if tech_data and tech_data.get("mcap_cr", 0) < 200:
                 print(f"[REJECTED] {company} is a Microcap. Skipping.")
                 analysis_queue.task_done()
                 continue
