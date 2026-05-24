@@ -12,15 +12,16 @@ from flask import Flask
 from queue import Queue
 from datetime import datetime
 from collections import deque
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
 # =========================================================
 # CONFIGURATION
 # =========================================================
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
-GEMINI_API_KEY = "AIzaSyBk7jqnuiuZ0yfX3UlFniuDNKG8KQqk_6U" # <-- REPLACE WITH YOUR SECURE KEY
+# Best Practice: Pull from Render Env Vars, fallback to string if local
+OPENAI_API_KEY = os.environ.get("key_yxvIeNaabk3Mxu4M", "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
+") 
 
 DB_NAME = "bse_results.db"
 BASE_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
@@ -31,12 +32,10 @@ HEADERS = {
     "Origin": "https://www.bseindia.com",
 }
 
-print("Initializing Gemini Client...", flush=True)
-client = genai.Client(api_key=GEMINI_API_KEY)
+print("Initializing OpenAI Client...", flush=True)
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 analysis_queue = Queue(maxsize=100)
-
-# FIX: In-memory cache to prevent YFinance from bottlenecking the queue
 yf_cache = {}
 
 # =========================================================
@@ -46,7 +45,7 @@ app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "BSE Hybrid PEAD Scanner V6 is Alive!", 200
+    return "BSE PEAD Scanner V7 (OpenAI) is Alive!", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
@@ -86,7 +85,6 @@ def save_announcement(conn, item, pdf_url):
 # COMMUNICATIONS LAYER
 # =========================================================
 def escape_md(text):
-    """FIX: Prevents rogue characters in headlines from breaking Telegram Markdown"""
     if not text: return ""
     return str(text).replace("*", "").replace("_", "").replace("[", "").replace("]", "").replace("`", "")
 
@@ -114,17 +112,17 @@ def create_session():
 # QUANTITATIVE LAYER 1: LOCAL DETERMINISTIC PARSER
 # =========================================================
 def extract_financials_locally(pdf_path):
-    extracted = {"revenue_cr": 0.0, "pat_cr": 0.0, "found": False}
+    extracted = {"revenue_cr": 0.0, "pat_cr": 0.0, "found": False, "raw_text": ""}
     try:
         with pdfplumber.open(pdf_path) as pdf:
             text = ""
             for page in pdf.pages[:4]:
                 page_text = page.extract_text()
-                # FIX: Check for NoneType on scanned image pages
                 if page_text:
                     text += page_text + "\n"
-                
-            # TODO: Future upgrade to Camelot for exact table extraction
+            
+            extracted["raw_text"] = text # Save text so OpenAI doesn't have to re-read the PDF!
+            
             rev_match = re.search(r"(?:Total Income|Revenue from operations)[\s\S]{1,50}?([\d,]+\.\d+)", text, re.IGNORECASE)
             pat_match = re.search(r"(?:Profit for the period|Profit after tax|Net Profit)[\s\S]{1,50}?([\d,]+\.\d+)", text, re.IGNORECASE)
             
@@ -147,7 +145,6 @@ def extract_financials_locally(pdf_path):
 # QUANTITATIVE LAYER 2: SCORING & CACHING
 # =========================================================
 def get_technical_data(scrip):
-    """Fetches Technicals with an In-Memory Cache to prevent API throttling"""
     global yf_cache
     today = datetime.now().strftime("%Y-%m-%d")
     cache_key = f"{scrip}_{today}"
@@ -173,15 +170,14 @@ def get_technical_data(scrip):
             "above_200dma": current_price > dma_200 if not pd.isna(dma_200) else False,
             "vol_surge": (vol_today / vol_avg_20) > 2 if vol_avg_20 > 0 else False
         }
-        yf_cache[cache_key] = data # Save to cache
+        yf_cache[cache_key] = data
         return data
-        
     except Exception as e:
         print(f"YFinance Error for {scrip}: {e}", flush=True)
         return None
 
 # =========================================================
-# AI WORKER (CONSUMER THREAD - HYBRID PIPELINE)
+# AI WORKER (CONSUMER THREAD - OPENAI PIPELINE)
 # =========================================================
 def ai_worker_loop():
     session = create_session()
@@ -200,7 +196,8 @@ def ai_worker_loop():
             
             if tech_data and tech_data.get("mcap_cr", 0) < 500:
                 print(f"[REJECTED] {company} is a Microcap. Skipping.")
-                #continue
+                # UNCOMMENT NEXT LINE TO ENABLE PRODUCTION MODE (Skips microcaps)
+                # continue 
             
             pdf_bytes = None
             if pdf_url != "No PDF":
@@ -216,35 +213,41 @@ def ai_worker_loop():
                 temp_pdf_path = temp_pdf.name
             
             local_data = extract_financials_locally(temp_pdf_path)
-            gemini_insights = ""
+            ai_insights = ""
             
             if local_data["found"]:
                 print(f"   -> Local Parse Success! PAT: ₹{local_data['pat_cr']:.2f} Cr")
                 
-                # FIX: The Gatekeeper (Preparing for YoY/QoQ DB integration)
-                # Currently using absolute size + volume surge as a proxy until DB historicals are mapped
                 is_high_priority = (local_data['pat_cr'] > 15.0) and (tech_data and tech_data.get('vol_surge'))
                 
                 if is_high_priority:
-                    print("   -> 🔥 High Priority! Waking up Gemini for Qualitative extraction...")
-                    gemini_file = client.files.upload(file=temp_pdf_path, config={'mime_type': 'application/pdf'})
+                    print("   -> 🔥 High Priority! Sending text to OpenAI for Qualitative extraction...")
                     
-                    prompt = "Extract concise bullet points: 1. Management Guidance. 2. Order book wins. 3. Capex plans. If none, say 'Not explicitly mentioned.'"
-                    response = client.models.generate_content(model='gemini-2.0-flash', contents=[gemini_file, prompt])
-                    client.files.delete(name=gemini_file.name)
-                    gemini_insights = f"\n\n🧠 *QUALITATIVE INSIGHTS*\n{escape_md(response.text)}"
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": "You are an expert equity analyst. Extract concise bullet points."},
+                            {"role": "user", "content": f"Extract:\n1. Management guidance\n2. Order book updates\n3. Capex plans\n\nFrom this earnings text:\n{local_data['raw_text'][:12000]}"}
+                        ],
+                        temperature=0
+                    )
+                    ai_insights = f"\n\n🧠 *QUALITATIVE INSIGHTS*\n{escape_md(response.choices[0].message.content)}"
+                else:
+                    print("   -> Standard result. Bypassing OpenAI to save API quota.")
             else:
-                print("   -> Local Parse Failed (Scanned/Table format issue). Yielding to Gemini Backup...")
-                gemini_file = client.files.upload(file=temp_pdf_path, config={'mime_type': 'application/pdf'})
-                json_schema = {"type": "OBJECT", "properties": {"consolidated": {"type": "OBJECT", "properties": {"revenue_cr": {"type": "NUMBER"}, "pat_cr": {"type": "NUMBER"}}}}}
-                response = client.models.generate_content(
-                    model='gemini-2.0-flash',
-                    contents=[gemini_file, "Extract financials in Crores."],
-                    config=types.GenerateContentConfig(response_mime_type="application/json", response_schema=json_schema, temperature=0.0)
-                )
-                client.files.delete(name=gemini_file.name)
+                print("   -> Local Parse Failed. Falling back to OpenAI JSON Extraction...")
                 
-                ai_data = json.loads(response.text)
+                response = client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    response_format={"type": "json_object"},
+                    messages=[
+                        {"role": "system", "content": "You extract financial data. Always return JSON matching: {\"consolidated\": {\"revenue_cr\": 0.0, \"pat_cr\": 0.0}}"},
+                        {"role": "user", "content": f"Extract Revenue and PAT in Crores from this text:\n{local_data['raw_text'][:15000]}"}
+                    ],
+                    temperature=0
+                )
+                
+                ai_data = json.loads(response.choices[0].message.content)
                 if ai_data and ai_data.get('consolidated'):
                     local_data['revenue_cr'] = ai_data['consolidated'].get('revenue_cr', 0)
                     local_data['pat_cr'] = ai_data['consolidated'].get('pat_cr', 0)
@@ -258,7 +261,7 @@ def ai_worker_loop():
             if local_data["found"]:
                 msg += f"\n📊 *CURRENT QTR METRICS*\nRev: ₹{local_data['revenue_cr']:.2f} Cr\nPAT: ₹{local_data['pat_cr']:.2f} Cr\n"
             
-            msg += gemini_insights
+            msg += ai_insights
             msg += f"\n[📄 View PDF]({pdf_url})"
             
             send_telegram(msg)
@@ -267,11 +270,12 @@ def ai_worker_loop():
             error_str = str(e)
             print(f"[PIPELINE ERROR] {error_str}", flush=True)
             
-            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+            # OpenAI specific rate limit error catching
+            if "429" in error_str or "RateLimitError" in error_str:
                 item["retry_count"] = item.get("retry_count", 0) + 1
                 if item["retry_count"] <= 3:
-                    print(f"⚠️ Rate Limit! Re-queueing {company} (Attempt {item['retry_count']}/3)...", flush=True)
-                    time.sleep(60)
+                    print(f"⚠️ OpenAI Rate Limit! Re-queueing {company} (Attempt {item['retry_count']}/3)...", flush=True)
+                    time.sleep(20) # OpenAI limits usually reset faster than Gemini
                     analysis_queue.put(item)
                 else:
                     send_telegram(f"🔔 *{company}* (AI Exhausted)\n{headline}\n[📄 View PDF]({pdf_url})")
@@ -312,7 +316,7 @@ def main():
     threading.Thread(target=ai_worker_loop, daemon=True).start()
 
     print("\n" + "=" * 80)
-    print("V6.0 HYBRID EVENT-DRIVEN PEAD ENGINE ONLINE")
+    print("V7.0 OPENAI EVENT-DRIVEN PEAD ENGINE ONLINE")
     print("=" * 80 + "\n")
 
     while True:
@@ -355,5 +359,5 @@ def main():
             time.sleep(10)
 
 if __name__ == "__main__":
-    import pandas as pd # Needed for the pd.isna() check in yfinance
+    import pandas as pd
     main()
