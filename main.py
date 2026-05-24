@@ -18,7 +18,7 @@ from google.genai import types
 # =========================================================
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
-GEMINI_API_KEY = "AIzaSyBk7jqnuiuZ0yfX3UlFniuDNKG8KQqk_6U" # <-- Replace with your SECURE Gemini Key
+GEMINI_API_KEY = "YOUR_GEMINI_KEY" # <-- REPLACE WITH YOUR SECURE KEY
 
 DB_NAME = "bse_results.db"
 BASE_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
@@ -266,10 +266,22 @@ def ai_worker_loop():
             send_telegram(msg)
             
         except Exception as e:
-            print(f"[AI WORKER ERROR] {e}", flush=True)
-            send_telegram(f"🔔 *{company}*\n{headline}\n[📄 View PDF]({pdf_url})")
+            error_str = str(e)
+            print(f"[AI WORKER ERROR] {error_str}", flush=True)
             
-        analysis_queue.task_done()
+            # THE FIX: Rate Limit Handler & Automatic Re-queueing
+            if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                print("⚠️ Hit Gemini Rate Limit! Sleeping for 60 seconds...", flush=True)
+                time.sleep(60)
+                print(f"🔄 Re-queueing {company} so we don't lose it...", flush=True)
+                analysis_queue.put(item)
+            else:
+                send_telegram(f"🔔 *{company}*\n{headline}\n[📄 View PDF]({pdf_url})")
+            
+        finally:
+            # THE FIX: Guarantee a 5-second pace between PDFs so we don't hit the limit
+            time.sleep(5)
+            analysis_queue.task_done()
 
 # =========================================================
 # FAST SCANNER (PRODUCER THREAD)
@@ -314,7 +326,7 @@ def main():
             page_no = 1
             new_count = 0
             
-            # PAGINATION LOOP
+            # THE FIX: PAGINATION LOOP
             while True:
                 response = session.get(BASE_URL, params={
                     "pageno": page_no, "strCat": "Result", "strSearch": "P", 
