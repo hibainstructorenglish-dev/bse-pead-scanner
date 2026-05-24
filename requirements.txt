@@ -4,3 +4,5 @@ yfinance
 flask
 pdfplumber
 pandas
+camelot-py[cv]
+opencv-python-headless
