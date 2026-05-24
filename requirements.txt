@@ -1,5 +1,5 @@
 requests
-google-genai
+openai
 yfinance
 flask
 pdfplumber
