@@ -1,7 +1,7 @@
-openai==1.14.0
-requests==2.31.0
-pdfplumber==0.11.0
-Pillow==10.2.0
-pdfminer.six==20231228
-charset-normalizer==3.3.2
-urllib3==2.2.1
+openai
+requests
+pdfplumber
+Pillow
+pdfminer.six
+charset-normalizer
+urllib3
