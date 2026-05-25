@@ -5,3 +5,6 @@ Pillow
 pdfminer.six
 charset-normalizer
 urllib3
+yfinance
+pandas
+numpy
