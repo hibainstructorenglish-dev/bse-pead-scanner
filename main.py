@@ -1,9 +1,10 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v6.1
-# FINAL CLEAN STABLE VERSION
+# INSTITUTIONAL GPT PEAD ENGINE v6.2
+# TELEGRAM FIX EDITION
 # =========================================================
 
 import io
+import gc
 import json
 import time
 import sqlite3
@@ -17,10 +18,10 @@ from PIL import Image, ImageDraw, ImageFont
 # CONFIG
 # =========================================================
 
-TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
-TELEGRAM_CHAT_ID = "7630276313"
+TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN"
+TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
 
-OPENAI_API_KEY = "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"
+OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
 
 CHECK_INTERVAL = 60
 
@@ -93,7 +94,7 @@ def init_db():
     conn.close()
 
 # =========================================================
-# TELEGRAM TEXT
+# TELEGRAM MESSAGE
 # =========================================================
 
 def send_telegram_message(msg):
@@ -105,21 +106,25 @@ def send_telegram_message(msg):
 
     try:
 
-        requests.post(
+        response = requests.post(
 
             url,
 
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": msg[:3900]
+                "text": msg[:3500]
             },
 
             timeout=20
         )
 
+        print("TELEGRAM MESSAGE:")
+        print(response.status_code)
+        print(response.text)
+
     except Exception as e:
 
-        print("Telegram Error:", e)
+        print("Telegram Message Error:", e)
 
 # =========================================================
 # TELEGRAM PHOTO
@@ -134,13 +139,13 @@ def send_telegram_photo(image_bytes, caption):
 
     try:
 
-        requests.post(
+        response = requests.post(
 
             url,
 
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "caption": caption[:900]
+                "caption": caption[:300]
             },
 
             files={
@@ -152,12 +157,23 @@ def send_telegram_photo(image_bytes, caption):
                 )
             },
 
-            timeout=20
+            timeout=30
         )
+
+        print("\n📤 TELEGRAM PHOTO RESPONSE")
+        print(response.status_code)
+        print(response.text)
+
+        if response.status_code == 200:
+            return True
+
+        return False
 
     except Exception as e:
 
         print("Telegram Photo Error:", e)
+
+        return False
 
 # =========================================================
 # FETCH BSE RESULTS
@@ -227,7 +243,7 @@ def download_pdf(pdf_url):
         return None
 
 # =========================================================
-# SMART PAGE EXTRACTION
+# FINANCIAL PAGE EXTRACTION
 # =========================================================
 
 def extract_financial_pages(pdf_bytes):
@@ -246,6 +262,8 @@ def extract_financial_pages(pdf_bytes):
     ]
 
     extracted_text = ""
+
+    MAX_TEXT = 12000
 
     try:
 
@@ -269,7 +287,6 @@ def extract_financial_pages(pdf_bytes):
                     if keyword in lower:
                         score += 1
 
-                # RELAXED FILTER
                 if score >= 1:
 
                     print(
@@ -282,6 +299,9 @@ def extract_financial_pages(pdf_bytes):
                     )
 
                     extracted_text += text
+
+                    if len(extracted_text) > MAX_TEXT:
+                        break
 
     except Exception as e:
 
@@ -296,23 +316,9 @@ def extract_financial_pages(pdf_bytes):
 def gpt_extract(financial_text):
 
     prompt = f"""
-You are a professional institutional equity analyst.
+Extract latest quarterly earnings.
 
-Extract ONLY latest quarterly earnings data.
-
-IMPORTANT RULES:
-- Use latest quarterly numbers
-- Ignore yearly totals
-- Ignore balance sheet
-- Ignore cash flow
-- Prefer consolidated results
-- Use financial result table only
-- Never hallucinate values
-- Return 0 if unavailable
-
-Return ONLY valid JSON.
-
-FORMAT:
+Return ONLY JSON.
 
 {{
     "company_name": "",
@@ -321,21 +327,12 @@ FORMAT:
     "sector": "",
     "industry": "",
 
-    "revenue_current_cr": 0,
-    "revenue_prev_q_cr": 0,
-    "revenue_yoy_q_cr": 0,
-
-    "pat_current_cr": 0,
-    "pat_prev_q_cr": 0,
-    "pat_yoy_q_cr": 0,
-
     "revenue_yoy_growth_pct": 0,
     "pat_yoy_growth_pct": 0,
     "pat_qoq_growth_pct": 0,
 
     "ebitda_margin_pct": 0,
 
-    "guidance": "",
     "management_commentary": "",
     "order_book": "",
     "red_flags": "",
@@ -345,7 +342,7 @@ FORMAT:
 
 DOCUMENT:
 
-{financial_text[:25000]}
+{financial_text[:12000]}
 """
 
     try:
@@ -359,7 +356,7 @@ DOCUMENT:
                 {
                     "role": "system",
                     "content":
-                    "You are an expert financial extraction engine."
+                    "You are a financial extraction engine."
                 },
 
                 {
@@ -390,51 +387,6 @@ DOCUMENT:
 
         data = json.loads(content)
 
-        # =================================================
-        # AUTO CONFIDENCE ENGINE
-        # =================================================
-
-        if (
-            "confidence_score" not in data
-            or
-            data["confidence_score"] == 0
-        ):
-
-            confidence = 80
-
-            if data.get(
-                "revenue_current_cr",
-                0
-            ) <= 0:
-
-                confidence -= 30
-
-            if data.get(
-                "pat_current_cr",
-                0
-            ) == 0:
-
-                confidence -= 20
-
-            if data.get(
-                "revenue_yoy_q_cr",
-                0
-            ) == 0:
-
-                confidence -= 10
-
-            if data.get(
-                "pat_yoy_q_cr",
-                0
-            ) == 0:
-
-                confidence -= 10
-
-            data["confidence_score"] = max(
-                confidence,
-                10
-            )
-
         return data
 
     except Exception as e:
@@ -449,31 +401,15 @@ DOCUMENT:
 
 def validate(data):
 
-    try:
+    confidence = data.get(
+        "confidence_score",
+        0
+    )
 
-        confidence = data.get(
-            "confidence_score",
-            0
-        )
-
-        if confidence < 50:
-            return False
-
-        revenue = data["revenue_current_cr"]
-
-        pat = data["pat_current_cr"]
-
-        if revenue <= 0:
-            return False
-
-        if abs(pat) > revenue * 2:
-            return False
-
-        return True
-
-    except:
-
+    if confidence < 40:
         return False
+
+    return True
 
 # =========================================================
 # THEME ENGINE
@@ -481,162 +417,22 @@ def validate(data):
 
 def identify_theme_and_score(sector, industry):
 
-    if not sector and not industry:
-        return "Unclassified", 0
-
     text = f"{sector} {industry}".lower()
 
-    # TIER 1
-    if any(k in text for k in [
-
-        'ai',
-        'fiber',
-        'optical',
-        'software',
-        'information technology',
-        'communication equipment'
-
-    ]):
-        return "AI Infra/Fiber", 10
-
-    if any(k in text for k in [
-
-        'solar',
-        'wind',
-        'renewable',
-        'clean energy'
-
-    ]):
-        return "Renewable", 9
-
-    if any(k in text for k in [
-
-        'power',
-        'transmission',
-        'transformer',
-        'switchgear',
-        'cable',
-        'wires',
-        'grid',
-        'utility'
-
-    ]):
+    if "power" in text:
         return "Power Infra", 9
 
-    # TIER 2
-    if any(k in text for k in [
+    if "renewable" in text:
+        return "Renewable", 9
 
-        'defense',
-        'aerospace'
-
-    ]):
+    if "defense" in text:
         return "Defense", 8
 
-    if any(k in text for k in [
-
-        'semiconductor',
-        'electronics',
-        'ems'
-
-    ]):
-        return "Electronics Manufacturing", 8
-
-    if any(k in text for k in [
-
-        'telecom',
-        'telecommunications'
-
-    ]):
-        return "Telecom", 8
-
-    # TIER 3
-    if any(k in text for k in [
-
-        'construction',
-        'infrastructure',
-        'capital goods'
-
-    ]):
-        return "Infra/Capital Goods", 7
-
-    if any(k in text for k in [
-
-        'industrial',
-        'engineering',
-        'machinery'
-
-    ]):
-        return "Industrial", 7
-
-    # TIER 4
-    if any(k in text for k in [
-
-        'bank',
-        'financial',
-        'insurance'
-
-    ]):
-        return "Financial", 6
-
-    if any(k in text for k in [
-
-        'health',
-        'pharmaceutical',
-        'medical'
-
-    ]):
+    if "pharma" in text:
         return "Healthcare", 6
 
-    if any(k in text for k in [
-
-        'chemical',
-        'chemicals'
-
-    ]):
-        return "Chemical Specialty", 6
-
-    if any(k in text for k in [
-
-        'real estate',
-        'property'
-
-    ]):
+    if "real estate" in text:
         return "Real Estate", 5
-
-    if any(k in text for k in [
-
-        'fmcg',
-        'food',
-        'beverage'
-
-    ]):
-        return "Consumer Brand", 5
-
-    if any(k in text for k in [
-
-        'retail',
-        'consumer cyclical'
-
-    ]):
-        return "Retail/Consumer", 5
-
-    if any(k in text for k in [
-
-        'logistics',
-        'shipping',
-        'transportation'
-
-    ]):
-        return "Logistics", 5
-
-    if any(k in text for k in [
-
-        'metal',
-        'steel',
-        'mining'
-
-    ]):
-        return "Metal/Commodity", 4
 
     return "Other", 3
 
@@ -663,9 +459,7 @@ def calculate_pead(data, theme_score):
         0
     )
 
-    # =====================================================
-    # HALLUCINATION CLAMPS
-    # =====================================================
+    # HALLUCINATION FILTERS
 
     if abs(rev_growth) > 300:
         rev_growth = 0
@@ -676,7 +470,8 @@ def calculate_pead(data, theme_score):
     if abs(qoq_growth) > 300:
         qoq_growth = 0
 
-    # Revenue
+    # REVENUE
+
     if rev_growth > 30:
         score += 15
 
@@ -684,63 +479,26 @@ def calculate_pead(data, theme_score):
         score += 10
 
     # PAT
+
     if pat_growth > 50:
         score += 25
 
     elif pat_growth > 20:
         score += 15
 
-    # QoQ
+    # QOQ
+
     if qoq_growth > 15:
         score += 10
 
     # EBITDA
+
     if data.get(
         "ebitda_margin_pct",
         0
     ) > 20:
 
         score += 8
-
-    commentary = (
-        data.get("guidance", "")
-        +
-        data.get(
-            "management_commentary",
-            ""
-        )
-    ).lower()
-
-    bullish_keywords = [
-
-        "strong demand",
-        "healthy pipeline",
-        "capacity expansion",
-        "record order",
-        "growth momentum",
-        "margin improvement",
-        "positive outlook"
-    ]
-
-    bearish_keywords = [
-
-        "margin pressure",
-        "weak demand",
-        "slowdown",
-        "uncertainty",
-        "decline",
-        "loss"
-    ]
-
-    for word in bullish_keywords:
-
-        if word in commentary:
-            score += 3
-
-    for word in bearish_keywords:
-
-        if word in commentary:
-            score -= 3
 
     score += theme_score
 
@@ -775,20 +533,11 @@ def generate_dashboard(data, pead, theme):
 
     try:
 
-        title_font = ImageFont.truetype(
-            "arial.ttf",
-            34
-        )
+        title_font = ImageFont.load_default()
 
-        data_font = ImageFont.truetype(
-            "arial.ttf",
-            24
-        )
+        data_font = ImageFont.load_default()
 
-        score_font = ImageFont.truetype(
-            "arial.ttf",
-            60
-        )
+        score_font = ImageFont.load_default()
 
     except:
 
@@ -798,7 +547,6 @@ def generate_dashboard(data, pead, theme):
 
     white = (255,255,255)
     green = (34,197,94)
-    red = (255,80,80)
     cyan = (45,212,191)
 
     draw.text(
@@ -809,54 +557,39 @@ def generate_dashboard(data, pead, theme):
     )
 
     draw.text(
-        (30,85),
+        (30,80),
         f"Theme: {theme}",
         fill=cyan,
         font=data_font
     )
 
     draw.text(
-        (700,20),
-        "PEAD",
-        fill=cyan,
-        font=data_font
-    )
-
-    draw.text(
-        (700,60),
-        str(pead["score"]),
+        (650,30),
+        f"PEAD {pead['score']}",
         fill=cyan,
         font=score_font
     )
 
-    metrics = [
+    draw.text(
+        (30,180),
+        f"Revenue Growth: {pead['rev_growth']:+.1f}%",
+        fill=green,
+        font=data_font
+    )
 
-        ("Revenue Growth", pead["rev_growth"]),
-        ("PAT Growth", pead["pat_growth"]),
-        ("QoQ PAT", pead["qoq_growth"])
-    ]
+    draw.text(
+        (30,260),
+        f"PAT Growth: {pead['pat_growth']:+.1f}%",
+        fill=green,
+        font=data_font
+    )
 
-    y = 180
-
-    for name, value in metrics:
-
-        color = green if value >= 0 else red
-
-        draw.text(
-            (30,y),
-            name,
-            fill=white,
-            font=data_font
-        )
-
-        draw.text(
-            (350,y),
-            f"{value:+.1f}%",
-            fill=color,
-            font=data_font
-        )
-
-        y += 70
+    draw.text(
+        (30,340),
+        f"QoQ PAT: {pead['qoq_growth']:+.1f}%",
+        fill=green,
+        font=data_font
+    )
 
     img_bytes = io.BytesIO()
 
@@ -880,7 +613,7 @@ def main():
     init_db()
 
     print("=" * 60)
-    print("🚀 INSTITUTIONAL GPT PEAD ENGINE v6.1")
+    print("🚀 GPT PEAD ENGINE v6.2")
     print("=" * 60)
 
     while True:
@@ -906,11 +639,6 @@ def main():
                     "Unknown"
                 )
 
-                headline = item.get(
-                    "HEADLINE",
-                    ""
-                )
-
                 attachment = item.get(
                     "ATTACHMENTNAME",
                     ""
@@ -919,8 +647,11 @@ def main():
                 if not attachment.endswith(".pdf"):
                     continue
 
-                if "board meeting" in headline.lower():
-                    continue
+                print("\n" + "=" * 60)
+                print("🚀 NEW RESULT")
+                print("=" * 60)
+
+                print("Company:", company)
 
                 pdf_url = (
                     "https://www.bseindia.com/"
@@ -928,64 +659,54 @@ def main():
                     + attachment
                 )
 
-                print("\n" + "=" * 60)
-                print("🚀 NEW RESULT")
-                print("=" * 60)
-
-                print("Company:", company)
-
                 # DOWNLOAD PDF
+
                 pdf_bytes = download_pdf(
                     pdf_url
                 )
 
                 if not pdf_bytes:
 
-                    print("❌ PDF Download Failed")
+                    print("❌ PDF Failed")
 
                     continue
 
-                # EXTRACT FINANCIAL PAGES
+                # EXTRACT TEXT
+
                 financial_text = extract_financial_pages(
                     pdf_bytes
                 )
 
-                if len(financial_text) < 1000:
+                if len(financial_text) < 500:
 
                     print(
-                        "❌ No Financial Pages Found"
+                        "❌ No Financial Data"
                     )
 
                     continue
 
-                # GPT EXTRACTION
+                # GPT
+
                 data = gpt_extract(
                     financial_text
                 )
 
                 if not data:
 
-                    print(
-                        "❌ GPT Extraction Failed"
-                    )
+                    print("❌ GPT Failed")
 
                     continue
 
                 # VALIDATION
+
                 if not validate(data):
 
-                    print("\n❌ VALIDATION FAILED")
-
-                    print(
-                        json.dumps(
-                            data,
-                            indent=2
-                        )
-                    )
+                    print("❌ Validation Failed")
 
                     continue
 
                 # THEME
+
                 theme, theme_score = (
 
                     identify_theme_and_score(
@@ -1003,70 +724,69 @@ def main():
                 )
 
                 # PEAD
+
                 pead = calculate_pead(
                     data,
                     theme_score
                 )
 
-                # LOW SCORE FILTER
+                print("DEBUG PEAD:", pead)
+
+                # SCORE FILTER
+
                 if pead["score"] < MIN_PEAD_SCORE:
 
-                    print(
-                        "❌ Low PEAD Score"
-                    )
+                    print("❌ Low PEAD Score")
 
                     continue
 
                 # DASHBOARD
+
                 dashboard = generate_dashboard(
                     data,
                     pead,
                     theme
                 )
 
-                # TELEGRAM CAPTION
+                # CAPTION
+
                 caption = (
 
-                    f"🚀 {company}\n\n"
-
-                    f"🎯 PEAD Score: "
-                    f"{pead['score']}\n"
-
-                    f"📈 Revenue Growth: "
-                    f"{pead['rev_growth']:+.1f}%\n"
-
-                    f"💰 PAT Growth: "
-                    f"{pead['pat_growth']:+.1f}%\n"
-
-                    f"⚡ Theme: "
-                    f"{theme}\n"
-
-                    f"🏭 Sector: "
-                    f"{data.get('sector', '')}\n"
-
-                    f"🏢 Industry: "
-                    f"{data.get('industry', '')}"
+                    f"{company}\n"
+                    f"PEAD: {pead['score']}\n"
+                    f"Revenue: {pead['rev_growth']:+.1f}%\n"
+                    f"PAT: {pead['pat_growth']:+.1f}%\n"
+                    f"Theme: {theme}"
                 )
 
-                # SEND PHOTO
-                send_telegram_photo(
+                print("📤 Sending Telegram Dashboard...")
+
+                # PHOTO
+
+                photo_ok = send_telegram_photo(
                     dashboard,
                     caption
                 )
 
+                if photo_ok:
+
+                    print("✅ PHOTO SENT")
+
+                else:
+
+                    print("❌ PHOTO FAILED")
+
                 # COMMENTARY
+
                 commentary = (
 
-                    f"🧠 Commentary\n\n"
-
+                    f"Commentary:\n\n"
                     f"{data.get('management_commentary', '')}\n\n"
 
-                    f"📦 Order Book\n\n"
-
+                    f"Order Book:\n\n"
                     f"{data.get('order_book', '')}\n\n"
 
-                    f"⚠️ Red Flags\n\n"
-
+                    f"Red Flags:\n\n"
                     f"{data.get('red_flags', '')}"
                 )
 
@@ -1074,66 +794,23 @@ def main():
                     commentary
                 )
 
-                # DATABASE
-                try:
-
-                    conn = sqlite3.connect(DB_NAME)
-
-                    cur = conn.cursor()
-
-                    cur.execute("""
-
-                    INSERT OR REPLACE INTO pead_results (
-
-                        news_id,
-                        company,
-                        quarter,
-                        revenue_growth,
-                        pat_growth,
-                        pead_score,
-                        theme
-
-                    )
-
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-
-                    """, (
-
-                        news_id,
-                        company,
-                        data.get("quarter", ""),
-                        pead["rev_growth"],
-                        pead["pat_growth"],
-                        pead["score"],
-                        theme
-                    ))
-
-                    conn.commit()
-
-                    conn.close()
-
-                except Exception as db_error:
-
-                    print(
-                        "DB Error:",
-                        db_error
-                    )
-
                 print("✅ ALERT SENT")
+
+                gc.collect()
+
+                time.sleep(2)
 
             print(
 
                 f"\n[{time.strftime('%H:%M:%S')}] "
-
                 f"Alive | Seen={len(seen)}"
             )
 
         except Exception as e:
 
-            print(
-                "MAIN LOOP ERROR:",
-                e
-            )
+            print("MAIN LOOP ERROR:", e)
+
+        gc.collect()
 
         time.sleep(CHECK_INTERVAL)
 
