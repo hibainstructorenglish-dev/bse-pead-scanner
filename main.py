@@ -1,363 +1,499 @@
+# =========================================================
+# INSTITUTIONAL GPT PEAD ENGINE v6.1 (RENDER.COM EDITION)
+# FINAL CLEAN STABLE VERSION
+# =========================================================
+
 import os
-import re
+import io
 import json
 import time
 import sqlite3
-import tempfile
 import requests
-import threading
-import yfinance as yf
 import pdfplumber
-from flask import Flask
-from queue import Queue
-from datetime import datetime
-from collections import deque
+
 from openai import OpenAI
+from PIL import Image, ImageDraw, ImageFont
 
 # =========================================================
-# CONFIGURATION
+# CONFIG (USING ENVIRONMENT VARIABLES)
 # =========================================================
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
 
-# Hardcoded API Key for Private Repo. KEEP THIS ON ONE SINGLE LINE!
 OPENAI_API_KEY = "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"
 
-DB_NAME = "bse_results.db"
-BASE_URL = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/136.0.0.0 Safari/537.36",
+CHECK_INTERVAL = 60
+DB_NAME = "pead_results.db"
+MIN_PEAD_SCORE = 25
+
+# =========================================================
+# OPENAI
+# =========================================================
+
+client = OpenAI(
+    api_key=OPENAI_API_KEY
+)
+
+# =========================================================
+# REQUEST SESSION
+# =========================================================
+
+session = requests.Session()
+
+session.headers.update({
+    "User-Agent": "Mozilla/5.0",
     "Referer": "https://www.bseindia.com/",
-    "Origin": "https://www.bseindia.com",
-}
-
-print("Initializing OpenAI Client...", flush=True)
-client = OpenAI(api_key=OPENAI_API_KEY)
-
-analysis_queue = Queue(maxsize=100)
-yf_cache = {}
+    "Origin": "https://www.bseindia.com"
+})
 
 # =========================================================
-# FLASK KEEP-ALIVE SERVER 
+# DATABASE
 # =========================================================
-app = Flask(__name__)
 
-@app.route('/')
-def home():
-    return "BSE PEAD Scanner V7 (OpenAI) is Alive!", 200
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port)
-
-# =========================================================
-# DATABASE LAYER
-# =========================================================
 def init_db():
-    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS announcements (
-            news_id TEXT PRIMARY KEY,
-            scrip_cd TEXT,
-            company TEXT,
-            headline TEXT,
-            pdf_url TEXT,
-            inserted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
+    conn = sqlite3.connect(DB_NAME)
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS pead_results (
+        news_id TEXT PRIMARY KEY,
+        company TEXT,
+        quarter TEXT,
+        revenue_growth REAL,
+        pat_growth REAL,
+        pead_score INTEGER,
+        theme TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
     """)
     conn.commit()
-    return conn
-
-def load_seen_news(conn):
-    cursor = conn.cursor()
-    cursor.execute("SELECT news_id FROM announcements ORDER BY inserted_at DESC LIMIT 5000")
-    return deque([x[0] for x in cursor.fetchall()], maxlen=5000)
-
-def save_announcement(conn, item, pdf_url):
-    conn.execute("""
-        INSERT OR IGNORE INTO announcements (news_id, scrip_cd, company, headline, pdf_url) 
-        VALUES (?, ?, ?, ?, ?)
-    """, (item.get("NEWSID"), str(item.get("SCRIP_CD")), item.get("SLONGNAME"), item.get("HEADLINE"), pdf_url))
-    conn.commit()
+    conn.close()
 
 # =========================================================
-# COMMUNICATIONS LAYER
+# TELEGRAM TEXT
 # =========================================================
-def escape_md(text):
-    if not text: return ""
-    return str(text).replace("*", "").replace("_", "").replace("[", "").replace("]", "").replace("`", "")
 
-def send_telegram(message):
+def send_telegram_message(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        requests.post(url, data={
-            "chat_id": TELEGRAM_CHAT_ID, 
-            "text": message,
-            "parse_mode": "Markdown"
-        }, timeout=10)
+        requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg[:3900]
+            },
+            timeout=20
+        )
     except Exception as e:
-        print("Telegram Error:", e, flush=True)
+        print("Telegram Error:", e)
 
-def create_session():
-    session = requests.Session()
-    session.headers.update(HEADERS)
+# =========================================================
+# TELEGRAM PHOTO
+# =========================================================
+
+def send_telegram_photo(image_bytes, caption):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     try:
-        session.get("https://www.bseindia.com/", timeout=10)
-        return session
-    except:
+        requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption[:900]
+            },
+            files={
+                "photo": ("dashboard.png", image_bytes, "image/png")
+            },
+            timeout=20
+        )
+    except Exception as e:
+        print("Telegram Photo Error:", e)
+
+# =========================================================
+# FETCH BSE RESULTS
+# =========================================================
+
+def fetch_latest_results():
+    today = time.strftime("%Y%m%d")
+    params = {
+        "pageno": 1, "strCat": "Result", "strPrevDate": today,
+        "strToDate": today, "strScrip": "", "strSearch": "P",
+        "strType": "C", "subcategory": "-1"
+    }
+    url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
+    try:
+        response = session.get(url, params=params, timeout=20)
+        data = response.json()
+        return data.get("Table", [])
+    except Exception as e:
+        print("BSE Fetch Error:", e)
+        return []
+
+# =========================================================
+# DOWNLOAD PDF
+# =========================================================
+
+def download_pdf(pdf_url):
+    try:
+        response = session.get(pdf_url, timeout=20)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        print("PDF Download Error:", e)
         return None
 
 # =========================================================
-# QUANTITATIVE LAYER 1: LOCAL DETERMINISTIC PARSER
+# SMART PAGE EXTRACTION
 # =========================================================
-def extract_financials_locally(pdf_path):
-    extracted = {"revenue_cr": 0.0, "pat_cr": 0.0, "found": False, "raw_text": ""}
+
+def extract_financial_pages(pdf_bytes):
+    keywords = [
+        "revenue from operations", "statement of audited financial results",
+        "statement of unaudited financial results", "profit for the period",
+        "profit before tax", "total income", "earnings per share",
+        "financial results", "ebitda"
+    ]
+    extracted_text = ""
     try:
-        with pdfplumber.open(pdf_path) as pdf:
-            text = ""
-            for page in pdf.pages[:4]:
-                page_text = page.extract_text()
-                if page_text:
-                    text += page_text + "\n"
-            
-            extracted["raw_text"] = text # Save text so OpenAI doesn't have to re-read the PDF!
-            
-            rev_match = re.search(r"(?:Total Income|Revenue from operations)[\s\S]{1,50}?([\d,]+\.\d+)", text, re.IGNORECASE)
-            pat_match = re.search(r"(?:Profit for the period|Profit after tax|Net Profit)[\s\S]{1,50}?([\d,]+\.\d+)", text, re.IGNORECASE)
-            
-            if rev_match and pat_match:
-                rev_val = float(rev_match.group(1).replace(",", ""))
-                pat_val = float(pat_match.group(1).replace(",", ""))
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for idx, page in enumerate(pdf.pages):
+                text = page.extract_text()
+                if not text: continue
+                lower = text.lower()
+                score = sum(1 for keyword in keywords if keyword in lower)
                 
-                if rev_val > 5000: 
-                    rev_val = rev_val / 100
-                    pat_val = pat_val / 100
-                    
-                extracted["revenue_cr"] = rev_val
-                extracted["pat_cr"] = pat_val
-                extracted["found"] = True
+                if score >= 1:
+                    print(f"✅ Financial Page Detected: Page {idx+1}")
+                    extracted_text += f"\n\n--- PAGE {idx+1} ---\n\n{text}"
     except Exception as e:
-        print(f"[LOCAL PARSE ERROR] {e}", flush=True)
-    return extracted
+        print("PDF Extraction Error:", e)
+    return extracted_text
 
 # =========================================================
-# QUANTITATIVE LAYER 2: SCORING & CACHING
+# GPT EXTRACTION
 # =========================================================
-def get_technical_data(scrip):
-    global yf_cache
-    today = datetime.now().strftime("%Y-%m-%d")
-    cache_key = f"{scrip}_{today}"
-    
-    if cache_key in yf_cache:
-        return yf_cache[cache_key]
 
+def gpt_extract(financial_text):
+    prompt = f"""
+You are a professional institutional equity analyst.
+Extract ONLY latest quarterly earnings data.
+IMPORTANT RULES:
+- Use latest quarterly numbers
+- Ignore yearly totals
+- Ignore balance sheet
+- Ignore cash flow
+- Prefer consolidated results
+- Use financial result table only
+- Never hallucinate values
+- Return 0 if unavailable
+
+Return ONLY valid JSON.
+
+FORMAT:
+{{
+    "company_name": "",
+    "quarter": "",
+    "sector": "",
+    "industry": "",
+    "revenue_current_cr": 0,
+    "revenue_prev_q_cr": 0,
+    "revenue_yoy_q_cr": 0,
+    "pat_current_cr": 0,
+    "pat_prev_q_cr": 0,
+    "pat_yoy_q_cr": 0,
+    "revenue_yoy_growth_pct": 0,
+    "pat_yoy_growth_pct": 0,
+    "pat_qoq_growth_pct": 0,
+    "ebitda_margin_pct": 0,
+    "guidance": "",
+    "management_commentary": "",
+    "order_book": "",
+    "red_flags": "",
+    "confidence_score": 0
+}}
+
+DOCUMENT:
+{financial_text[:25000]}
+"""
     try:
-        ticker = yf.Ticker(f"{scrip}.BO")
-        hist = ticker.history(period="1y")
-        
-        if hist.empty:
-            return None
-            
-        mcap = ticker.info.get("marketCap", 0) / 10000000 
-        current_price = hist['Close'].iloc[-1]
-        dma_200 = hist['Close'].rolling(window=200).mean().iloc[-1]
-        vol_today = hist['Volume'].iloc[-1]
-        vol_avg_20 = hist['Volume'].rolling(window=20).mean().iloc[-1]
-        
-        data = {
-            "mcap_cr": mcap,
-            "above_200dma": current_price > dma_200 if not pd.isna(dma_200) else False,
-            "vol_surge": (vol_today / vol_avg_20) > 2 if vol_avg_20 > 0 else False
-        }
-        yf_cache[cache_key] = data
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are an expert financial extraction engine."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0
+        )
+        content = response.choices[0].message.content
+        content = content.replace("```json", "").replace("```", "")
+        data = json.loads(content)
+
+        # AUTO CONFIDENCE ENGINE
+        if "confidence_score" not in data or data["confidence_score"] == 0:
+            confidence = 80
+            if data.get("revenue_current_cr", 0) <= 0: confidence -= 30
+            if data.get("pat_current_cr", 0) == 0: confidence -= 20
+            if data.get("revenue_yoy_q_cr", 0) == 0: confidence -= 10
+            if data.get("pat_yoy_q_cr", 0) == 0: confidence -= 10
+            data["confidence_score"] = max(confidence, 10)
         return data
     except Exception as e:
-        print(f"YFinance Error for {scrip}: {e}", flush=True)
+        print("GPT Error:", e)
         return None
 
 # =========================================================
-# AI WORKER (CONSUMER THREAD - OPENAI PIPELINE)
+# VALIDATION
 # =========================================================
-def ai_worker_loop():
-    session = create_session()
-    while True:
-        item = analysis_queue.get()
-        company = escape_md(item.get("SLONGNAME"))
-        scrip = item.get("SCRIP_CD")
-        headline = escape_md(item.get("HEADLINE"))
-        pdf_url = item.get("PDF_URL")
-        temp_pdf_path = None
-        
-        print(f"\n[PIPELINE] Processing {company}...", flush=True)
-        
-        try:
-            tech_data = get_technical_data(scrip)
-            
-            if tech_data and tech_data.get("mcap_cr", 0) < 500:
-                print(f"[REJECTED] {company} is a Microcap. Skipping.")
-                # UNCOMMENT NEXT LINE TO ENABLE PRODUCTION MODE (Skips microcaps)
-                # continue 
-            
-            pdf_bytes = None
-            if pdf_url != "No PDF":
-                resp = session.get(pdf_url, stream=True, timeout=15)
-                resp.raise_for_status() 
-                pdf_bytes = resp.content
 
-            if not pdf_bytes:
-                raise ValueError("Empty PDF")
-
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_pdf:
-                temp_pdf.write(pdf_bytes)
-                temp_pdf_path = temp_pdf.name
-            
-            local_data = extract_financials_locally(temp_pdf_path)
-            ai_insights = ""
-            
-            if local_data["found"]:
-                print(f"   -> Local Parse Success! PAT: ₹{local_data['pat_cr']:.2f} Cr")
-                
-                is_high_priority = (local_data['pat_cr'] > 15.0) and (tech_data and tech_data.get('vol_surge'))
-                
-                if is_high_priority:
-                    print("   -> 🔥 High Priority! Sending text to OpenAI for Qualitative extraction...")
-                    
-                    response = client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": "You are an expert equity analyst. Extract concise bullet points."},
-                            {"role": "user", "content": f"Extract:\n1. Management guidance\n2. Order book updates\n3. Capex plans\n\nFrom this earnings text:\n{local_data['raw_text'][:12000]}"}
-                        ],
-                        temperature=0
-                    )
-                    ai_insights = f"\n\n🧠 *QUALITATIVE INSIGHTS*\n{escape_md(response.choices[0].message.content)}"
-                else:
-                    print("   -> Standard result. Bypassing OpenAI to save API quota.")
-            else:
-                print("   -> Local Parse Failed. Falling back to OpenAI JSON Extraction...")
-                
-                response = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    response_format={"type": "json_object"},
-                    messages=[
-                        {"role": "system", "content": "You extract financial data. Always return JSON matching: {\"consolidated\": {\"revenue_cr\": 0.0, \"pat_cr\": 0.0}}"},
-                        {"role": "user", "content": f"Extract Revenue and PAT in Crores from this text:\n{local_data['raw_text'][:15000]}"}
-                    ],
-                    temperature=0
-                )
-                
-                ai_data = json.loads(response.choices[0].message.content)
-                if ai_data and ai_data.get('consolidated'):
-                    local_data['revenue_cr'] = ai_data['consolidated'].get('revenue_cr', 0)
-                    local_data['pat_cr'] = ai_data['consolidated'].get('pat_cr', 0)
-                    local_data['found'] = True
-            
-            msg = f"🚀 *{company}* ({scrip})\n\n"
-            if tech_data:
-                msg += f"📈 *Mkt Cap:* ₹{tech_data.get('mcap_cr', 0):.0f} Cr\n"
-                if tech_data.get('vol_surge'): msg += f"🌊 Volume Surge Detected\n"
-                
-            if local_data["found"]:
-                msg += f"\n📊 *CURRENT QTR METRICS*\nRev: ₹{local_data['revenue_cr']:.2f} Cr\nPAT: ₹{local_data['pat_cr']:.2f} Cr\n"
-            
-            msg += ai_insights
-            msg += f"\n[📄 View PDF]({pdf_url})"
-            
-            send_telegram(msg)
-            
-        except Exception as e:
-            error_str = str(e)
-            print(f"[PIPELINE ERROR] {error_str}", flush=True)
-            
-            # OpenAI specific rate limit error catching
-            if "429" in error_str or "RateLimitError" in error_str:
-                item["retry_count"] = item.get("retry_count", 0) + 1
-                if item["retry_count"] <= 3:
-                    print(f"⚠️ OpenAI Rate Limit! Re-queueing {company} (Attempt {item['retry_count']}/3)...", flush=True)
-                    time.sleep(20) # OpenAI limits usually reset faster than Gemini
-                    analysis_queue.put(item)
-                else:
-                    send_telegram(f"🔔 *{company}* (AI Exhausted)\n{headline}\n[📄 View PDF]({pdf_url})")
-            else:
-                send_telegram(f"🔔 *{company}* (Parse Error)\n{headline}\n[📄 View PDF]({pdf_url})")
-            
-        finally:
-            if temp_pdf_path and os.path.exists(temp_pdf_path):
-                try: os.remove(temp_pdf_path)
-                except: pass
-            time.sleep(2)
-            analysis_queue.task_done()
-
-# =========================================================
-# FAST SCANNER (PRODUCER THREAD)
-# =========================================================
-def process_item_fast(conn, item, seen_news):
-    news_id = item.get("NEWSID")
-    if not news_id or news_id in seen_news:
+def validate(data):
+    try:
+        confidence = data.get("confidence_score", 0)
+        if confidence < 50: return False
+        revenue = data["revenue_current_cr"]
+        pat = data["pat_current_cr"]
+        if revenue <= 0: return False
+        if abs(pat) > revenue * 2: return False
+        return True
+    except:
         return False
 
-    seen_news.append(news_id)
-    filename = item.get("ATTACHMENTNAME", "")
-    pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{filename}" if filename else "No PDF"
-    save_announcement(conn, item, pdf_url)
-    
-    if item.get("CATEGORYNAME") == "Result":
-        item["PDF_URL"] = pdf_url
-        analysis_queue.put(item) 
-    return True
+# =========================================================
+# THEME ENGINE
+# =========================================================
+
+def identify_theme_and_score(sector, industry):
+    if not sector and not industry: return "Unclassified", 0
+    text = f"{sector} {industry}".lower()
+
+    if any(k in text for k in ['ai', 'fiber', 'optical', 'software', 'information technology', 'communication equipment']):
+        return "AI Infra/Fiber", 10
+    if any(k in text for k in ['solar', 'wind', 'renewable', 'clean energy']):
+        return "Renewable", 9
+    if any(k in text for k in ['power', 'transmission', 'transformer', 'switchgear', 'cable', 'wires', 'grid', 'utility']):
+        return "Power Infra", 9
+    if any(k in text for k in ['defense', 'aerospace']):
+        return "Defense", 8
+    if any(k in text for k in ['semiconductor', 'electronics', 'ems']):
+        return "Electronics Manufacturing", 8
+    if any(k in text for k in ['telecom', 'telecommunications']):
+        return "Telecom", 8
+    if any(k in text for k in ['construction', 'infrastructure', 'capital goods']):
+        return "Infra/Capital Goods", 7
+    if any(k in text for k in ['industrial', 'engineering', 'machinery']):
+        return "Industrial", 7
+    if any(k in text for k in ['bank', 'financial', 'insurance']):
+        return "Financial", 6
+    if any(k in text for k in ['health', 'pharmaceutical', 'medical']):
+        return "Healthcare", 6
+    if any(k in text for k in ['chemical', 'chemicals']):
+        return "Chemical Specialty", 6
+    if any(k in text for k in ['real estate', 'property']):
+        return "Real Estate", 5
+    if any(k in text for k in ['fmcg', 'food', 'beverage']):
+        return "Consumer Brand", 5
+    if any(k in text for k in ['retail', 'consumer cyclical']):
+        return "Retail/Consumer", 5
+    if any(k in text for k in ['logistics', 'shipping', 'transportation']):
+        return "Logistics", 5
+    if any(k in text for k in ['metal', 'steel', 'mining']):
+        return "Metal/Commodity", 4
+    return "Other", 3
+
+# =========================================================
+# PEAD ENGINE
+# =========================================================
+
+def calculate_pead(data, theme_score):
+    score = 0
+    rev_growth = data.get("revenue_yoy_growth_pct", 0)
+    pat_growth = data.get("pat_yoy_growth_pct", 0)
+    qoq_growth = data.get("pat_qoq_growth_pct", 0)
+
+    if abs(rev_growth) > 300: rev_growth = 0
+    if abs(pat_growth) > 500: pat_growth = 0
+    if abs(qoq_growth) > 300: qoq_growth = 0
+
+    if rev_growth > 30: score += 15
+    elif rev_growth > 15: score += 10
+    if pat_growth > 50: score += 25
+    elif pat_growth > 20: score += 15
+    if qoq_growth > 15: score += 10
+    if data.get("ebitda_margin_pct", 0) > 20: score += 8
+
+    commentary = (data.get("guidance", "") + data.get("management_commentary", "")).lower()
+    bullish_keywords = ["strong demand", "healthy pipeline", "capacity expansion", "record order", "growth momentum", "margin improvement", "positive outlook"]
+    bearish_keywords = ["margin pressure", "weak demand", "slowdown", "uncertainty", "decline", "loss"]
+
+    for word in bullish_keywords:
+        if word in commentary: score += 3
+    for word in bearish_keywords:
+        if word in commentary: score -= 3
+
+    score += theme_score
+    return {
+        "score": max(min(score, 100), 0),
+        "rev_growth": rev_growth,
+        "pat_growth": pat_growth,
+        "qoq_growth": qoq_growth
+    }
+
+# =========================================================
+# SAFE FONT LOADER
+# =========================================================
+def get_font(size):
+    """Safely loads a font in Render's Linux environment"""
+    try:
+        # Tries to load standard Linux fonts (DejaVu is commonly available)
+        return ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", size)
+    except IOError:
+        try:
+            return ImageFont.truetype("/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf", size)
+        except IOError:
+            # Absolute fallback if no TTF is found
+            return ImageFont.load_default()
+
+# =========================================================
+# DASHBOARD
+# =========================================================
+
+def generate_dashboard(data, pead, theme):
+    img = Image.new("RGB", (900, 520), (15, 23, 42))
+    draw = ImageDraw.Draw(img)
+
+    title_font = get_font(34)
+    data_font = get_font(24)
+    score_font = get_font(60)
+
+    white = (255, 255, 255)
+    green = (34, 197, 94)
+    red = (255, 80, 80)
+    cyan = (45, 212, 191)
+
+    draw.text((30, 30), data.get("company_name", "Unknown"), fill=white, font=title_font)
+    draw.text((30, 85), f"Theme: {theme}", fill=cyan, font=data_font)
+    draw.text((700, 20), "PEAD", fill=cyan, font=data_font)
+    draw.text((700, 60), str(pead["score"]), fill=cyan, font=score_font)
+
+    metrics = [
+        ("Revenue Growth", pead["rev_growth"]),
+        ("PAT Growth", pead["pat_growth"]),
+        ("QoQ PAT", pead["qoq_growth"])
+    ]
+
+    y = 180
+    for name, value in metrics:
+        color = green if value >= 0 else red
+        draw.text((30, y), name, fill=white, font=data_font)
+        draw.text((350, y), f"{value:+.1f}%", fill=color, font=data_font)
+        y += 70
+
+    img_bytes = io.BytesIO()
+    img.save(img_bytes, format="PNG")
+    img_bytes.seek(0)
+    return img_bytes
+
+# =========================================================
+# MAIN ENGINE
+# =========================================================
+
+seen = set()
 
 def main():
-    conn = init_db()
-    seen_news = load_seen_news(conn)
-    session = create_session()
+    if not TELEGRAM_TOKEN or not OPENAI_API_KEY:
+        print("❌ CRITICAL ERROR: Missing Environment Variables!")
+        return
 
-    threading.Thread(target=run_web_server, daemon=True).start()
-    threading.Thread(target=ai_worker_loop, daemon=True).start()
-
-    print("\n" + "=" * 80)
-    print("V7.0 OPENAI EVENT-DRIVEN PEAD ENGINE ONLINE")
-    print("=" * 80 + "\n")
+    init_db()
+    print("=" * 60)
+    print("🚀 INSTITUTIONAL GPT PEAD ENGINE v6.1 (RENDER)")
+    print("=" * 60)
 
     while True:
         try:
-            if session is None:
-                time.sleep(10)
-                session = create_session()
-                continue
+            results = fetch_latest_results()
+            for item in results:
+                news_id = item.get("NEWSID")
+                if not news_id or news_id in seen: continue
+                seen.add(news_id)
 
-            today = datetime.now().strftime("%Y%m%d")
-            page_no = 1
-            new_count = 0
-            
-            while True:
-                response = session.get(BASE_URL, params={
-                    "pageno": page_no, "strCat": "Result", "strSearch": "P", 
-                    "strToDate": today, "strPrevDate": today, "strType": "C"
-                }, timeout=10)
-                
-                data = response.json()
-                table = data.get("Table", [])
-                
-                if not table: break
-                    
-                total_pages = int(table[0].get("TotalPageCnt", 1))
-                all_old = True
-                
-                for item in table:
-                    if process_item_fast(conn, item, seen_news):
-                        new_count += 1
-                        all_old = False
-                        
-                if all_old or page_no >= total_pages: break
-                page_no += 1 
-            
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Pulse | New: {new_count} | Queue: {analysis_queue.qsize()}", flush=True)
-            time.sleep(45)
+                company = item.get("SLONGNAME", "Unknown")
+                headline = item.get("HEADLINE", "")
+                attachment = item.get("ATTACHMENTNAME", "")
 
+                if not attachment.endswith(".pdf") or "board meeting" in headline.lower():
+                    continue
+
+                pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}"
+                
+                print("\n" + "=" * 60)
+                print(f"🚀 NEW RESULT: {company}")
+                
+                pdf_bytes = download_pdf(pdf_url)
+                if not pdf_bytes:
+                    print("❌ PDF Download Failed")
+                    continue
+
+                financial_text = extract_financial_pages(pdf_bytes)
+                if len(financial_text) < 1000:
+                    print("❌ No Financial Pages Found")
+                    continue
+
+                data = gpt_extract(financial_text)
+                if not data or not validate(data):
+                    print("\n❌ VALIDATION FAILED OR GPT ERROR")
+                    continue
+
+                theme, theme_score = identify_theme_and_score(data.get("sector", ""), data.get("industry", ""))
+                pead = calculate_pead(data, theme_score)
+
+                if pead["score"] < MIN_PEAD_SCORE:
+                    print("❌ Low PEAD Score")
+                    continue
+
+                dashboard = generate_dashboard(data, pead, theme)
+                
+                caption = (
+                    f"🚀 {company}\n\n"
+                    f"🎯 PEAD Score: {pead['score']}\n"
+                    f"📈 Revenue Growth: {pead['rev_growth']:+.1f}%\n"
+                    f"💰 PAT Growth: {pead['pat_growth']:+.1f}%\n"
+                    f"⚡ Theme: {theme}\n"
+                    f"🏭 Sector: {data.get('sector', '')}\n"
+                    f"🏢 Industry: {data.get('industry', '')}"
+                )
+
+                send_telegram_photo(dashboard, caption)
+
+                commentary = (
+                    f"🧠 Commentary\n\n{data.get('management_commentary', '')}\n\n"
+                    f"📦 Order Book\n\n{data.get('order_book', '')}\n\n"
+                    f"⚠️ Red Flags\n\n{data.get('red_flags', '')}"
+                )
+                send_telegram_message(commentary)
+
+                try:
+                    conn = sqlite3.connect(DB_NAME)
+                    cur = conn.cursor()
+                    cur.execute("""
+                    INSERT OR REPLACE INTO pead_results 
+                    (news_id, company, quarter, revenue_growth, pat_growth, pead_score, theme)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (news_id, company, data.get("quarter", ""), pead["rev_growth"], pead["pat_growth"], pead["score"], theme))
+                    conn.commit()
+                    conn.close()
+                except Exception as db_error:
+                    print("DB Error:", db_error)
+
+                print("✅ ALERT SENT")
+
+            print(f"\n[{time.strftime('%H:%M:%S')}] Alive | Seen={len(seen)}")
         except Exception as e:
-            time.sleep(10)
+            print("MAIN LOOP ERROR:", e)
+
+        time.sleep(CHECK_INTERVAL)
+
+# =========================================================
+# START
+# =========================================================
 
 if __name__ == "__main__":
-    import pandas as pd
     main()
