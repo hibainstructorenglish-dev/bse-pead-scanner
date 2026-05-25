@@ -18,19 +18,19 @@ from PIL import Image, ImageDraw, ImageFont
 # =========================================================
 # CONFIG
 # =========================================================
+TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
+TELEGRAM_CHAT_ID = "7630276313"
 
-TELEGRAM_TOKEN = "YOUR_TELEGRAM_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
+OPENAI_API_KEY = "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"
 
-OPENAI_API_KEY = "YOUR_OPENAI_API_KEY"
 
 CHECK_INTERVAL = 60
 
 DB_NAME = "pead_results.db"
 
-MIN_PEAD_SCORE = 25
+MIN_PEAD_SCORE = 35
 
-MICROCAP_LIMIT_CR = 1000
+MICROCAP_LIMIT_CR = 500
 
 # =========================================================
 # OPENAI
