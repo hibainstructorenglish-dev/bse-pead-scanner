@@ -1,6 +1,6 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v6.2
-# TELEGRAM FIX EDITION
+# INSTITUTIONAL GPT PEAD ENGINE v7.0
+# MICROCAP FILTER + TELEGRAM FIX + RENDER STABLE
 # =========================================================
 
 import io
@@ -10,6 +10,7 @@ import time
 import sqlite3
 import requests
 import pdfplumber
+import yfinance as yf
 
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
@@ -28,6 +29,8 @@ CHECK_INTERVAL = 60
 DB_NAME = "pead_results.db"
 
 MIN_PEAD_SCORE = 25
+
+MICROCAP_LIMIT_CR = 1000
 
 # =========================================================
 # OPENAI
@@ -73,13 +76,11 @@ def init_db():
 
         company TEXT,
 
-        quarter TEXT,
+        pead_score INTEGER,
 
         revenue_growth REAL,
 
         pat_growth REAL,
-
-        pead_score INTEGER,
 
         theme TEXT,
 
@@ -120,7 +121,6 @@ def send_telegram_message(msg):
 
         print("TELEGRAM MESSAGE:")
         print(response.status_code)
-        print(response.text)
 
     except Exception as e:
 
@@ -162,7 +162,6 @@ def send_telegram_photo(image_bytes, caption):
 
         print("\n📤 TELEGRAM PHOTO RESPONSE")
         print(response.status_code)
-        print(response.text)
 
         if response.status_code == 200:
             return True
@@ -172,6 +171,49 @@ def send_telegram_photo(image_bytes, caption):
     except Exception as e:
 
         print("Telegram Photo Error:", e)
+
+        return False
+
+# =========================================================
+# MARKET CAP FILTER
+# =========================================================
+
+def is_microcap(company_name):
+
+    try:
+
+        search = yf.Search(company_name)
+
+        quotes = search.quotes
+
+        if not quotes:
+            return False
+
+        symbol = quotes[0]["symbol"]
+
+        stock = yf.Ticker(symbol)
+
+        info = stock.info
+
+        market_cap = info.get(
+            "marketCap",
+            0
+        )
+
+        market_cap_cr = market_cap / 10000000
+
+        print(
+            f"Market Cap: ₹{market_cap_cr:.0f} Cr"
+        )
+
+        if market_cap_cr < MICROCAP_LIMIT_CR:
+            return True
+
+        return False
+
+    except Exception as e:
+
+        print("Market Cap Error:", e)
 
         return False
 
@@ -243,7 +285,7 @@ def download_pdf(pdf_url):
         return None
 
 # =========================================================
-# FINANCIAL PAGE EXTRACTION
+# EXTRACT FINANCIAL PAGES
 # =========================================================
 
 def extract_financial_pages(pdf_bytes):
@@ -262,8 +304,6 @@ def extract_financial_pages(pdf_bytes):
     ]
 
     extracted_text = ""
-
-    MAX_TEXT = 12000
 
     try:
 
@@ -294,13 +334,9 @@ def extract_financial_pages(pdf_bytes):
                         f"Page {idx+1}"
                     )
 
-                    extracted_text += (
-                        f"\n\n--- PAGE {idx+1} ---\n\n"
-                    )
-
                     extracted_text += text
 
-                    if len(extracted_text) > MAX_TEXT:
+                    if len(extracted_text) > 12000:
                         break
 
     except Exception as e:
@@ -531,19 +567,7 @@ def generate_dashboard(data, pead, theme):
 
     draw = ImageDraw.Draw(img)
 
-    try:
-
-        title_font = ImageFont.load_default()
-
-        data_font = ImageFont.load_default()
-
-        score_font = ImageFont.load_default()
-
-    except:
-
-        title_font = data_font = score_font = (
-            ImageFont.load_default()
-        )
+    font = ImageFont.load_default()
 
     white = (255,255,255)
     green = (34,197,94)
@@ -553,42 +577,42 @@ def generate_dashboard(data, pead, theme):
         (30,30),
         data["company_name"],
         fill=white,
-        font=title_font
+        font=font
     )
 
     draw.text(
         (30,80),
         f"Theme: {theme}",
         fill=cyan,
-        font=data_font
+        font=font
     )
 
     draw.text(
         (650,30),
         f"PEAD {pead['score']}",
         fill=cyan,
-        font=score_font
+        font=font
     )
 
     draw.text(
         (30,180),
         f"Revenue Growth: {pead['rev_growth']:+.1f}%",
         fill=green,
-        font=data_font
+        font=font
     )
 
     draw.text(
         (30,260),
         f"PAT Growth: {pead['pat_growth']:+.1f}%",
         fill=green,
-        font=data_font
+        font=font
     )
 
     draw.text(
         (30,340),
         f"QoQ PAT: {pead['qoq_growth']:+.1f}%",
         fill=green,
-        font=data_font
+        font=font
     )
 
     img_bytes = io.BytesIO()
@@ -613,7 +637,7 @@ def main():
     init_db()
 
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v6.2")
+    print("🚀 GPT PEAD ENGINE v7.0")
     print("=" * 60)
 
     while True:
@@ -652,6 +676,23 @@ def main():
                 print("=" * 60)
 
                 print("Company:", company)
+
+                # =================================================
+                # MICROCAP FILTER
+                # =================================================
+
+                if is_microcap(company):
+
+                    print(
+                        f"[REJECTED] {company} "
+                        f"is a Microcap. Skipping."
+                    )
+
+                    continue
+
+                # =================================================
+                # PDF URL
+                # =================================================
 
                 pdf_url = (
                     "https://www.bseindia.com/"
