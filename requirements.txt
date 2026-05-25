@@ -1,8 +1,4 @@
-requests
-openai
-yfinance
-flask
-pdfplumber
-pandas
-camelot-py[cv]
-opencv-python-headless
+openai==1.14.0
+requests==2.31.0
+pdfplumber==0.11.0
+Pillow==10.2.0
