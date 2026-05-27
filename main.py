@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v10.0 (THE QUANT MASTER)
+# INSTITUTIONAL GPT PEAD ENGINE v10.1 (DATA INGESTION FIX)
 # =========================================================
 
 import io
@@ -17,7 +17,7 @@ from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 
 # =========================================================
-# CONFIG
+# CONFIG & LOCAL CACHES
 # =========================================================
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
@@ -26,8 +26,15 @@ OPENAI_API_KEY = "sk-proj-HtYgGcxV8RU8xbas0v5Cgb2PBe5zynHFGynWrG7iaG7s8K6Vo6VbgH
 
 CHECK_INTERVAL = 60
 DB_NAME = "pead_results.db"
-MIN_PEAD_SCORE = 40  # Slightly raised since we now add Technical points!
+MIN_PEAD_SCORE = 40  
 MICROCAP_LIMIT_CR = 500
+
+# Add manual mappings here as you notice yfinance failing
+TICKER_CACHE = {
+    "GMR Airports": "GMRINFRA.NS",
+    "Time Technoplast": "TIMETECHNO.NS",
+    "Ramky Infrastructure": "RAMKY.NS"
+}
 
 # =========================================================
 # OPENAI & REQUESTS
@@ -87,26 +94,17 @@ def save_to_db(news_id, company, ticker, total_score, theme, entry_price, entry_
 # QUANT ANALYTICS & RESEARCH ENGINE
 # =========================================================
 def generate_pead_analytics():
-    """Generates an institutional research report on thematic drift performance."""
     print("\n" + "=" * 55)
     print("📊 PEAD THEMATIC PERFORMANCE REPORT (20-DAY DRIFT)")
     print("=" * 55)
-    
     try:
         conn = sqlite3.connect(DB_NAME)
         cur = conn.cursor()
-        
         cur.execute("""
-            SELECT theme, 
-                   COUNT(news_id) as sample_size,
-                   ROUND(AVG(price_day_20_pct), 2) as avg_20d_ret
-            FROM pead_results 
-            WHERE price_day_20_pct IS NOT NULL 
-            GROUP BY theme 
-            ORDER BY avg_20d_ret DESC
+            SELECT theme, COUNT(news_id) as sample_size, ROUND(AVG(price_day_20_pct), 2) as avg_20d_ret
+            FROM pead_results WHERE price_day_20_pct IS NOT NULL GROUP BY theme ORDER BY avg_20d_ret DESC
         """)
         rows = cur.fetchall()
-        
         if not rows:
             print("Not enough 20-day tracking data yet to generate report.")
         else:
@@ -115,7 +113,6 @@ def generate_pead_analytics():
             for row in rows:
                 theme, count, avg_ret = row
                 print(f"{theme:<25} | {count:<6} | {avg_ret:+.2f}%")
-        
         print("-" * 55 + "\n")
         conn.close()
     except Exception as e:
@@ -126,12 +123,10 @@ def update_future_returns():
     try:
         conn = sqlite3.connect(DB_NAME)
         cur = conn.cursor()
-        
         cur.execute("""
             SELECT news_id, ticker, entry_price, entry_date, 
                    price_day_1_pct, price_day_3_pct, price_day_5_pct, price_day_20_pct 
-            FROM pead_results 
-            WHERE price_day_20_pct IS NULL AND ticker IS NOT NULL
+            FROM pead_results WHERE price_day_20_pct IS NULL AND ticker IS NOT NULL
         """)
         pending_records = cur.fetchall()
         today = datetime.now()
@@ -139,7 +134,7 @@ def update_future_returns():
         for record in pending_records:
             news_id, ticker, entry_price, entry_date_str, d1, d3, d5, d20 = record
             if not entry_price or entry_price <= 0: continue
-                
+            
             entry_date = datetime.strptime(entry_date_str, "%Y-%m-%d")
             days_elapsed = (today - entry_date).days
             if days_elapsed < 1: continue
@@ -170,7 +165,6 @@ def update_future_returns():
 # TECHNICAL / MARKET STRUCTURE ENGINE
 # =========================================================
 def get_technical_factors(ticker):
-    """Calculates Relative Strength, Volume Breakout, and 200-DMA Trend."""
     try:
         if not ticker: return 0, 0, 0
             
@@ -181,11 +175,13 @@ def get_technical_factors(ticker):
         stock = yf.Ticker(ticker)
         hist = stock.history(period="1y")
         
-        if len(hist) < 200: return 0, 0, 0 # Not enough history
+        # ELITE FIX: Allow stocks with > 70 days of history
+        if len(hist) < 70: 
+            return 0, 0, 0 
 
         current_price = hist['Close'].iloc[-1]
         
-        # 1. RELATIVE STRENGTH
+        # 1. RELATIVE STRENGTH (Stock vs Nifty over ~63 trading days)
         stock_3m_start = hist['Close'].iloc[-63]
         stock_3m_ret = ((current_price - stock_3m_start) / stock_3m_start) * 100
         rs = stock_3m_ret - nifty_3m_ret
@@ -193,12 +189,13 @@ def get_technical_factors(ticker):
 
         # 2. VOLUME BREAKOUT
         current_vol = hist['Volume'].iloc[-1]
-        avg_vol_20 = hist['Volume'].iloc[-21:-1].mean()
+        avg_vol_20 = hist['Volume'].iloc[-21:-1].mean() if len(hist) > 21 else hist['Volume'].mean()
         vol_score = 8 if current_vol > (2 * avg_vol_20) else 0
 
-        # 3. 200 DMA TREND
-        dma_200 = hist['Close'].iloc[-200:].mean()
-        trend_score = 5 if current_price > dma_200 else 0
+        # 3. ADAPTIVE DMA TREND
+        dma_period = min(200, len(hist))
+        dma = hist['Close'].iloc[-dma_period:].mean()
+        trend_score = 5 if current_price > dma else 0
 
         return rs_score, vol_score, trend_score
     except Exception as e:
@@ -207,10 +204,23 @@ def get_technical_factors(ticker):
 
 def get_live_stock_data(company_name):
     try:
-        search = yf.Search(company_name)
+        # 1. CHECK LOCAL CACHE FIRST
+        for cached_name, symbol in TICKER_CACHE.items():
+            if cached_name.lower() in company_name.lower():
+                stock = yf.Ticker(symbol)
+                hist = stock.history(period="1d")
+                if not hist.empty: return symbol, hist['Close'].iloc[-1]
+
+        # 2. FALLBACK TO YFINANCE SEARCH (With appended "NSE" for better India results)
+        search = yf.Search(company_name + " NSE")
         if not search.quotes: return None, 0.0
         
         symbol = search.quotes[0]["symbol"]
+        
+        # Heuristic: Auto-append .NS if yfinance returns a raw ticker for India
+        if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
+            symbol += ".NS"
+            
         stock = yf.Ticker(symbol)
         hist = stock.history(period="1d")
         if hist.empty: return symbol, 0.0
@@ -229,8 +239,7 @@ def is_microcap(company_name):
         market_cap_cr = stock.info.get("marketCap", 0) / 10000000
         print(f"Market Cap: ₹{market_cap_cr:.0f} Cr")
         return market_cap_cr < MICROCAP_LIMIT_CR
-    except Exception as e:
-        print("Market Cap Error:", e)
+    except Exception:
         return False
 
 # =========================================================
@@ -239,8 +248,7 @@ def is_microcap(company_name):
 def send_telegram_message(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
-        response = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
-        print(f"TELEGRAM MESSAGE: {response.status_code}")
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
     except Exception:
         pass
 
@@ -248,14 +256,11 @@ def send_telegram_photo(image_bytes, caption):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     try:
         response = requests.post(
-            url,
-            data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-            files={"photo": ("dashboard.png", image_bytes, "image/png")},
-            timeout=30
+            url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
+            files={"photo": ("dashboard.png", image_bytes, "image/png")}, timeout=30
         )
         return response.status_code == 200
-    except Exception as e:
-        print("Telegram Photo Error:", e)
+    except Exception:
         return False
 
 # =========================================================
@@ -270,8 +275,7 @@ def fetch_latest_results():
     }
     url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
     try:
-        response = session.get(url, params=params, timeout=20)
-        return response.json().get("Table", [])
+        return session.get(url, params=params, timeout=20).json().get("Table", [])
     except Exception:
         return []
 
@@ -305,6 +309,7 @@ def regex_extract(financial_text):
     if rev_match and pat_match:
         return {
             "company_name": "Extracted via Regex", "quarter": "Latest",
+            "sector": "General / Other", "industry": "General / Other",
             "revenue_yoy_growth_pct": float(rev_match.group(1)),
             "pat_yoy_growth_pct": float(pat_match.group(1)),
             "pat_qoq_growth_pct": 0, "ebitda_margin_pct": 0,
@@ -314,10 +319,15 @@ def regex_extract(financial_text):
     return None
 
 def gpt_extract(financial_text):
+    # ELITE FIX: Upgraded Inference Prompt
     prompt = f"""
     Extract latest quarterly earnings. Return ONLY JSON. Use null if a metric is completely missing.
+    Prioritize extracting PAT / Net Profit growth. Do NOT omit PAT if present in tables.
+    If exact sector unavailable, infer probable sector and industry from company operations.
     {{
-        "company_name": "", "quarter": "", "sector": "", "industry": "",
+        "company_name": "", "quarter": "", 
+        "sector": "Guess likely sector from company and document", 
+        "industry": "Guess likely industry from company and document",
         "revenue_yoy_growth_pct": null, "pat_yoy_growth_pct": null, "pat_qoq_growth_pct": null,
         "ebitda_margin_pct": null, "management_commentary": "", "order_book": "", "red_flags": ""
     }}
@@ -352,12 +362,12 @@ def validate(data):
 def identify_theme_and_score(sector, industry):
     text = f"{sector} {industry}".lower()
     themes = {
-        "Defense & Aerospace": {"keywords": ["defense", "defence", "aerospace", "shipyard", "drone"], "score": 10},
+        "Defense & Aerospace": {"keywords": ["defense", "defence", "aerospace", "shipyard", "drone", "aviation", "airport"], "score": 10},
         "Power & Energy": {"keywords": ["power", "energy", "transmission", "grid", "solar"], "score": 10},
-        "Infrastructure & Capital Goods": {"keywords": ["infrastructure", "capital goods", "construction", "railway"], "score": 8},
-        "EMS & Electronics": {"keywords": ["ems", "electronics", "semiconductor"], "score": 8},
+        "Infrastructure & Capital Goods": {"keywords": ["infrastructure", "capital goods", "construction", "railway", "infra"], "score": 8},
+        "EMS & Electronics": {"keywords": ["ems", "electronics", "semiconductor", "technology"], "score": 8},
         "Healthcare & Pharma": {"keywords": ["pharma", "healthcare", "api", "hospitals"], "score": 5},
-        "IT & Software": {"keywords": ["it", "software", "technology"], "score": 4},
+        "IT & Software": {"keywords": ["it", "software"], "score": 4},
         "Financials": {"keywords": ["bank", "nbfc", "finance"], "score": 3}
     }
     for theme_name, t_data in themes.items():
@@ -387,13 +397,7 @@ def calculate_pead(data, theme_score):
     if (data.get("ebitda_margin_pct") or 0) > 20: score += 8
 
     score += theme_score
-
-    return {
-        "score": max(min(score, 100), 0),
-        "rev_growth": rev_growth,
-        "pat_growth": pat_growth,
-        "qoq_growth": qoq_growth
-    }
+    return {"score": max(min(score, 100), 0), "rev_growth": rev_growth, "pat_growth": pat_growth, "qoq_growth": qoq_growth}
 
 def get_pead_grade(score):
     if score >= 85: return "Institutional Monster 🚀"
@@ -414,17 +418,15 @@ def generate_dashboard(company_name, pead, theme, tech_score, rs, vol, trend):
     draw.text((30,80), f"Theme: {theme}", fill=cyan, font=font)
     draw.text((650,30), f"TOTAL SCORE {pead['score'] + tech_score}", fill=gold, font=font)
     
-    # Fundamentals
     draw.text((30,160), "--- FUNDAMENTALS ---", fill=white, font=font)
     draw.text((30,200), f"Revenue Growth: {pead['rev_growth']:+.1f}%", fill=green, font=font)
     draw.text((30,240), f"PAT Growth: {pead['pat_growth']:+.1f}%", fill=green, font=font)
     draw.text((30,280), f"QoQ PAT: {pead['qoq_growth']:+.1f}%", fill=green, font=font)
 
-    # Technicals
     draw.text((30,360), "--- TECHNICAL & FLOWS ---", fill=white, font=font)
     draw.text((30,400), f"Relative Strength (vs Nifty): {'Strong 🟢' if rs > 0 else 'Weak 🔴'}", fill=white, font=font)
     draw.text((30,440), f"Volume Breakout: {'Detected 🟢' if vol > 0 else 'Normal'}", fill=white, font=font)
-    draw.text((30,480), f"Market Structure: {'> 200 DMA 🟢' if trend > 0 else '< 200 DMA 🔴'}", fill=white, font=font)
+    draw.text((30,480), f"Market Structure: {'> DMA 🟢' if trend > 0 else '< DMA 🔴'}", fill=white, font=font)
 
     img_bytes = io.BytesIO()
     img.save(img_bytes, format="PNG")
@@ -439,19 +441,18 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v10.0 (ELITE QUANT MASTER)")
+    print("🚀 GPT PEAD ENGINE v10.1 (INFERENCE + CACHE)")
     print("=" * 60)
 
     while True:
         try:
             update_future_returns()
-            generate_pead_analytics() # Print current research lab stats
+            generate_pead_analytics() 
             
             results = fetch_latest_results()
             for item in results:
                 news_id = item.get("NEWSID")
-                if not news_id or news_id in seen:
-                    continue
+                if not news_id or news_id in seen: continue
                 
                 seen.add(news_id)
                 company = item.get("SLONGNAME", "Unknown")
@@ -465,7 +466,6 @@ def main():
                     print(f"[REJECTED] {company} is a Microcap. Skipping.")
                     continue
 
-                # Get Pricing and Ticker immediately (Needed for Technicals)
                 ticker, entry_price = get_live_stock_data(company)
                 if not ticker:
                     print("❌ Could not map Ticker. Skipping.")
@@ -482,7 +482,7 @@ def main():
 
                 data = regex_extract(financial_text)
                 if not data:
-                    print("⚠️ Regex Missed. Falling back to GPT Extraction...")
+                    print("⚠️ Regex Missed. Falling back to GPT...")
                     data = gpt_extract(financial_text)
 
                 if not data:
@@ -496,11 +496,9 @@ def main():
                     print("❌ Validation Failed (Missing required metrics)")
                     continue
 
-                # Step 1: Fundamental & Thematic Score
-                theme, theme_score = identify_theme_and_score(data.get("sector", ""), data.get("industry", ""))
+                theme, theme_score = identify_theme_and_score(str(data.get("sector")), str(data.get("industry")))
                 pead = calculate_pead(data, theme_score)
                 
-                # Step 2: Technical & Volume Score
                 rs_score, vol_score, trend_score = get_technical_factors(ticker)
                 tech_score = rs_score + vol_score + trend_score
                 
@@ -513,11 +511,7 @@ def main():
 
                 entry_date_str = datetime.now().strftime("%Y-%m-%d")
 
-                save_to_db(
-                    news_id, company, ticker, total_score, theme, 
-                    entry_price, entry_date_str, 
-                    pead['rev_growth'], pead['pat_growth'], pead['qoq_growth']
-                )
+                save_to_db(news_id, company, ticker, total_score, theme, entry_price, entry_date_str, pead['rev_growth'], pead['pat_growth'], pead['qoq_growth'])
 
                 dashboard = generate_dashboard(company, pead, theme, tech_score, rs_score, vol_score, trend_score)
                 grade = get_pead_grade(total_score)
@@ -529,11 +523,11 @@ def main():
                     f"Revenue YoY: {pead['rev_growth']:+.1f}%\n"
                     f"PAT YoY: {pead['pat_growth']:+.1f}%\n"
                     f"PAT QoQ: {pead['qoq_growth']:+.1f}%\n"
-                    f"EBITDA Margin: {data.get('ebitda_margin_pct', 0)}%\n\n"
+                    f"EBITDA Margin: {data.get('ebitda_margin_pct') or 0}%\n\n"
                     f"⚙️ TECHNICALS\n"
                     f"Outperforming Nifty: {'Yes 🟢' if rs_score > 0 else 'No 🔴'}\n"
                     f"Volume Breakout: {'Yes 🟢' if vol_score > 0 else 'No 🔴'}\n"
-                    f"Trend: {'> 200 DMA 🟢' if trend_score > 0 else '< 200 DMA 🔴'}\n\n"
+                    f"Trend: {'> DMA 🟢' if trend_score > 0 else '< DMA 🔴'}\n\n"
                     f"Theme: {theme}\n"
                     f"TOTAL QUANT SCORE: {total_score}"
                 )
@@ -541,14 +535,12 @@ def main():
                 print("📤 Sending Telegram Alert...")
                 if send_telegram_photo(dashboard, caption):
                     print("✅ PHOTO SENT")
-                    
                     commentary = (
                         f"Commentary:\n\n{data.get('management_commentary', '')}\n\n"
                         f"Order Book:\n\n{data.get('order_book', '')}\n\n"
                         f"Red Flags:\n\n{data.get('red_flags', '')}"
                     )
                     send_telegram_message(commentary)
-                    print("✅ COMMENTARY SENT")
 
                 gc.collect()
                 time.sleep(2)
