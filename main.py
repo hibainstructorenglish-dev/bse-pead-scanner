@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v9.6 (PRODUCTION MASTER)
+# INSTITUTIONAL GPT PEAD ENGINE v10.2 (MASTER + AUTO-CACHE)
 # =========================================================
 
 import io
@@ -9,6 +9,7 @@ import os
 import json
 import time
 import sqlite3
+import logging
 import requests
 import pdfplumber
 import yfinance as yf
@@ -17,34 +18,23 @@ from datetime import datetime, timedelta
 from openai import OpenAI
 from PIL import Image, ImageDraw, ImageFont
 
+# --- MUTE YFINANCE SPAM ---
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+
 # =========================================================
-# CONFIG & CACHE
+# CONFIG
 # =========================================================
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
 
-OPENAI_API_KEY = "afdf"
+OPENAI_API_KEY = "code"
 
 CHECK_INTERVAL = 60
 DB_NAME = "pead_results.db"
 MIN_PEAD_SCORE = 40  
 MICROCAP_LIMIT_CR = 500
 
-TICKER_CACHE = {
-    "GMR Airports": "GMRAIRPORT.NS",
-    "Time Technoplast": "TIMETECHNO.NS",
-    "Ramky Infrastructure": "RAMKY.NS",
-    "Cello World": "CELLO.NS",
-    "Axiscades": "AXISCADES.NS",
-    "HPL Electric": "HPL.NS",
-    "Universal Autofoundry": "UNIAUTO.NS"
-}
-
-# =========================================================
-# OPENAI & REQUESTS
-# =========================================================
 client = OpenAI(api_key=OPENAI_API_KEY)
-
 session = requests.Session()
 session.headers.update({
     "User-Agent": "Mozilla/5.0",
@@ -94,9 +84,6 @@ def save_to_db(news_id, company, ticker, final_score, theme, entry_price, entry_
     except Exception as e:
         print("DB Save Error:", e)
 
-# =========================================================
-# QUANT ANALYTICS & RESEARCH ENGINE
-# =========================================================
 def update_future_returns():
     print("\n🔄 Running Forward Return Tracker...")
     try:
@@ -141,50 +128,44 @@ def update_future_returns():
         print("Update Returns Error:", e)
 
 # =========================================================
-# MARKET DATA & TECHNICAL BONUS LAYER
+# DYNAMIC CACHE & TICKER ROUTING
 # =========================================================
-def get_technical_bonus(ticker):
+TICKER_MASTER_FILE = "ticker_master.json"
+
+def load_ticker_master():
+    if os.path.exists(TICKER_MASTER_FILE):
+        try:
+            with open(TICKER_MASTER_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def update_ticker_cache(company_name, symbol):
     try:
-        if not ticker:
-            return 0
-
-        stock = yf.Ticker(ticker)
-        hist = stock.history(period="6mo")
-
-        if len(hist) < 50:
-            return 0
-
-        lookback = min(63, len(hist)-1)
-        current_price = hist['Close'].iloc[-1]
-        old_price = hist['Close'].iloc[-lookback]
-
-        stock_return = ((current_price - old_price) / old_price) * 100
-        bonus = 0
-
-        # Relative strength
-        if stock_return > 15:
-            bonus += 5
-        elif stock_return > 8:
-            bonus += 3
-
-        # Volume breakout
-        avg_vol = hist['Volume'].tail(20).mean()
-        current_vol = hist['Volume'].iloc[-1]
-
-        if current_vol > 2 * avg_vol:
-            bonus += 5
-
-        # Trend filter
-        dma_period = min(200, len(hist))
-        dma = hist['Close'].tail(dma_period).mean()
-
-        if current_price > dma:
-            bonus += 3
-
-        return bonus
+        cache = load_ticker_master()
+        cache[company_name] = symbol
+        with open(TICKER_MASTER_FILE, "w") as f:
+            json.dump(cache, f, indent=4)
     except Exception as e:
-        print("Technical Error:", e)
-        return 0
+        print("Cache Save Error:", e)
+
+def map_bse_to_nse_via_screener(scrip_cd):
+    if not scrip_cd or len(scrip_cd) != 6: return None
+    url = f"https://www.screener.in/company/{scrip_cd}/"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    try:
+        response = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
+        final_url = response.url
+        if "company/" in final_url:
+            parts = final_url.split('/')
+            if len(parts) >= 5:
+                symbol = parts[4]
+                if not symbol.isdigit():
+                    return f"{symbol}.NS"
+    except Exception:
+        pass
+    return None
 
 def clean_name_for_search(company_name):
     name = re.sub(r'(?i)\b(ltd|limited|corp|corporation|inc|co)\b\.?', '', company_name)
@@ -194,37 +175,49 @@ def clean_name_for_search(company_name):
 
 def get_live_stock_data(company_name, scrip_cd=""):
     try:
-        # 1. SCRIP CODE PRIMARY 
+        # 1. MANUAL CACHE FIRST
+        ticker_cache = load_ticker_master()
+        for cached_name, symbol in ticker_cache.items():
+            if cached_name.lower() in company_name.lower() or company_name.lower() in cached_name.lower():
+                stock = yf.Ticker(symbol)
+                hist = stock.history(period="1d")
+                if not hist.empty: return symbol, hist['Close'].iloc[-1]
+
+        # 2. SCREENER LOOKUP SECOND
+        if scrip_cd:
+            nse_symbol = map_bse_to_nse_via_screener(scrip_cd)
+            if nse_symbol:
+                stock = yf.Ticker(nse_symbol)
+                hist = stock.history(period="1d")
+                if not hist.empty:
+                    update_ticker_cache(company_name, nse_symbol)
+                    return nse_symbol, hist['Close'].iloc[-1]
+
+        # 3. YAHOO NSE SEARCH THIRD
+        clean_name = clean_name_for_search(company_name)
+        search = yf.Search(clean_name + " NSE")
+        if search.quotes:
+            symbol = search.quotes[0]["symbol"]
+            if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
+                symbol += ".NS"
+            stock = yf.Ticker(symbol)
+            hist = stock.history(period="1d")
+            if not hist.empty:
+                update_ticker_cache(company_name, symbol)
+                return symbol, hist['Close'].iloc[-1]
+
+        # 4. YAHOO BSE SYMBOL LAST
         if scrip_cd and len(scrip_cd) == 6:
             bse_symbol = f"{scrip_cd}.BO"
             stock = yf.Ticker(bse_symbol)
             hist = stock.history(period="1d")
             if not hist.empty:
+                update_ticker_cache(company_name, bse_symbol)
                 return bse_symbol, hist['Close'].iloc[-1]
 
-        # 2. LOCAL DICT CACHE
-        for cached_name, symbol in TICKER_CACHE.items():
-            if cached_name.lower() in company_name.lower():
-                stock = yf.Ticker(symbol)
-                hist = stock.history(period="1d")
-                if not hist.empty: return symbol, hist['Close'].iloc[-1]
+        return None, 0.0
 
-        # 3. YAHOO SEARCH FALLBACK
-        clean_name = clean_name_for_search(company_name)
-        search = yf.Search(clean_name + " NSE")
-        
-        if not search.quotes: return None, 0.0
-        symbol = search.quotes[0]["symbol"]
-        if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
-            symbol += ".NS"
-            
-        stock = yf.Ticker(symbol)
-        hist = stock.history(period="1d")
-        if hist.empty: return symbol, 0.0
-            
-        return symbol, hist['Close'].iloc[-1]
-    except Exception as e:
-        print(f"Pricing Fetch Error for {company_name}:", e)
+    except Exception:
         return None, 0.0
 
 def is_microcap(company_name, scrip_cd=""):
@@ -240,25 +233,35 @@ def is_microcap(company_name, scrip_cd=""):
         return False
 
 # =========================================================
-# TELEGRAM
+# TECHNICAL BONUS LAYER
 # =========================================================
-def send_telegram_message(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+def get_technical_bonus(ticker):
     try:
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
-    except Exception:
-        pass
+        if not ticker: return 0
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="6mo")
+        if len(hist) < 50: return 0
 
-def send_telegram_photo(image_bytes, caption):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    try:
-        response = requests.post(
-            url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-            files={"photo": ("dashboard.png", image_bytes, "image/png")}, timeout=30
-        )
-        return response.status_code == 200
+        lookback = min(63, len(hist)-1)
+        current_price = hist['Close'].iloc[-1]
+        old_price = hist['Close'].iloc[-lookback]
+        stock_return = ((current_price - old_price) / old_price) * 100
+        
+        bonus = 0
+        if stock_return > 15: bonus += 5
+        elif stock_return > 8: bonus += 3
+
+        avg_vol = hist['Volume'].tail(20).mean()
+        current_vol = hist['Volume'].iloc[-1]
+        if current_vol > 2 * avg_vol: bonus += 5
+
+        dma_period = min(200, len(hist))
+        dma = hist['Close'].tail(dma_period).mean()
+        if current_price > dma: bonus += 3
+
+        return bonus
     except Exception:
-        return False
+        return 0
 
 # =========================================================
 # BSE FETCHING & EXTRACTION
@@ -300,7 +303,6 @@ def extract_financial_pages(pdf_bytes):
                 if any(k in text.lower() for k in keywords):
                     print(f"✅ Financial Page Detected: Page {idx+1}")
                     extracted_text += text
-                    # v9.6: Increased token slice to 25k to capture deep PAT tables
                     if len(extracted_text) > 25000: break
     except Exception:
         pass
@@ -357,12 +359,8 @@ def validate(data):
     pat = data.get("pat_yoy_growth_pct")
     qoq = data.get("pat_qoq_growth_pct")
 
-    if revenue is None and (pat is None or pat < 25):
-        return False
-
-    if pat is None and qoq is None:
-        return False
-
+    if revenue is None and (pat is None or pat < 25): return False
+    if pat is None and qoq is None: return False
     return True
 
 def identify_theme_and_score(sector, industry):
@@ -391,33 +389,24 @@ def calculate_pead(data, theme_score):
     if abs(pat_growth) > 500: pat_growth = 0
     if abs(qoq_growth) > 300: qoq_growth = 0
 
-    # Revenue
     if rev_growth > 50: score += 20
     elif rev_growth > 30: score += 15
     elif rev_growth > 15: score += 10
     elif rev_growth > 8: score += 5
 
-    # PAT
     if pat_growth > 100: score += 30
     elif pat_growth > 50: score += 25
     elif pat_growth > 20: score += 15
     elif pat_growth > 10: score += 5
 
-    # QoQ
     if qoq_growth > 40: score += 15
     elif qoq_growth > 15: score += 10
 
-    # EBITDA
     if (data.get("ebitda_margin_pct") or 0) > 25: score += 10
     elif (data.get("ebitda_margin_pct") or 0) > 18: score += 5
 
-    # OPERATIONAL LEVERAGE BONUS
-    if rev_growth > 10 and pat_growth > 25:
-        score += 8
-        
-    # TURNAROUND DETECTION BONUS
-    if rev_growth > 80 and qoq_growth > 20:
-        score += 10
+    if rev_growth > 10 and pat_growth > 25: score += 8
+    if rev_growth > 80 and qoq_growth > 20: score += 10
 
     score += theme_score
     return {"score": max(min(score, 100), 0), "rev_growth": rev_growth, "pat_growth": pat_growth, "qoq_growth": qoq_growth}
@@ -429,8 +418,26 @@ def get_pead_grade(score):
     return "Normal 📊"
 
 # =========================================================
-# DASHBOARD
+# TELEGRAM & DASHBOARD
 # =========================================================
+def send_telegram_message(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    try:
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
+    except Exception:
+        pass
+
+def send_telegram_photo(image_bytes, caption):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    try:
+        response = requests.post(
+            url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
+            files={"photo": ("dashboard.png", image_bytes, "image/png")}, timeout=30
+        )
+        return response.status_code == 200
+    except Exception:
+        return False
+
 def generate_dashboard(company_name, pead, theme, final_score):
     img = Image.new("RGB", (900, 560), (15, 23, 42))
     draw = ImageDraw.Draw(img)
@@ -459,14 +466,13 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v9.6 (PRODUCTION MASTER)")
+    print("🚀 GPT PEAD ENGINE v10.2 (PRODUCTION MASTER)")
     print("=" * 60)
 
     cycle = 0
 
     while True:
         try:
-            # CPU/API Saver: Only run forward returns every ~5 hours
             if cycle % 300 == 0:
                 update_future_returns()
             
@@ -516,14 +522,9 @@ def main():
 
                 theme, theme_score = identify_theme_and_score(str(data.get("sector")), str(data.get("industry")))
                 
-                # 1. Primary Fundamental Scoring
                 pead = calculate_pead(data, theme_score)
                 base_score = pead['score']
-
-                # 2. Institutional Technical Bonus
                 tech_bonus = get_technical_bonus(ticker)
-
-                # 3. Final Tabulation
                 final_score = base_score + tech_bonus
                 
                 print(f"DEBUG SCORING -> Base PEAD: {base_score} | Tech Bonus: +{tech_bonus} | Final: {final_score}")
@@ -533,14 +534,12 @@ def main():
                     continue
 
                 entry_date_str = datetime.now().strftime("%Y-%m-%d")
-
                 save_to_db(news_id, company, ticker, final_score, theme, entry_price, entry_date_str, pead['rev_growth'], pead['pat_growth'], pead['qoq_growth'])
 
                 dashboard = generate_dashboard(company, pead, theme, final_score)
                 grade = get_pead_grade(final_score)
                 quarter = data.get('quarter', 'Latest Quarter')
 
-                # ELITE TELEGRAM MESSAGE FORMATTING
                 caption = (
                     f"🎯 {company}\n\n"
                     f"{grade}\n\n"
