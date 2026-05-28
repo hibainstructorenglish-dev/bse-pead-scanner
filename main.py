@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v11.2 (URL & CAP SAFETY)
+# INSTITUTIONAL GPT PEAD ENGINE v11.3 (CLEAN URL MASTER)
 # =========================================================
 
 import io
@@ -167,24 +167,20 @@ def get_screener_context(bse_code):
         soup = BeautifulSoup(response.text, "html.parser")
         text = soup.get_text(" ", strip=True)
 
-        # 1. NSE SYMBOL EXTRACTION
         nse_match = re.search(r'NSE\s*:\s*([A-Z0-9\-]+)', text, re.IGNORECASE)
         nse_symbol = None
         if nse_match:
             nse_symbol = nse_match.group(1).strip() + ".NS"
 
-        # 2. MARKET CAP EXTRACTION
         market_cap_match = re.search(r'Market Cap\s*₹\s*([\d,\.]+)', text)
         market_cap_cr = 0
         if market_cap_match:
             market_cap_cr = float(market_cap_match.group(1).replace(",", ""))
 
-        # 3. QUARTERLY HISTORICAL DATA TRACKING
         quarterly_data = []
         tables = soup.find_all("table")
         for table in tables:
             table_text = table.get_text(" ", strip=True).lower()
-            
             if "sales" in table_text and "profit" in table_text:
                 rows = table.find_all("tr")
                 parsed_rows = []
@@ -213,7 +209,6 @@ def clean_name_for_search(company_name):
 
 def get_live_stock_data(company_name, screener_context):
     try:
-        # 1. LOCAL CACHE MATCHING
         ticker_cache = load_ticker_master()
         for cached_name, symbol in ticker_cache.items():
             if cached_name.lower() in company_name.lower() or company_name.lower() in cached_name.lower():
@@ -221,7 +216,6 @@ def get_live_stock_data(company_name, screener_context):
                 hist = stock.history(period="1d")
                 if not hist.empty: return symbol, hist['Close'].iloc[-1]
 
-        # 2. USE POPULATED SCREENER SYMBOL DIRECTLY
         if screener_context and screener_context.get("nse_symbol"):
             nse_symbol = screener_context.get("nse_symbol")
             stock = yf.Ticker(nse_symbol)
@@ -230,7 +224,6 @@ def get_live_stock_data(company_name, screener_context):
                 update_ticker_cache(company_name, nse_symbol)
                 return nse_symbol, hist['Close'].iloc[-1]
 
-        # 3. FUZZY YAHOO TEXT SEARCH AS THIRD LAYER
         clean_name = clean_name_for_search(company_name)
         search = yf.Search(clean_name + " NSE")
         if search.quotes:
@@ -251,10 +244,8 @@ def get_live_stock_data(company_name, screener_context):
 
 def is_microcap(company_name, screener_context):
     try:
-        # Use Screener Cap metadata first to drop redundant network traffic
         if screener_context and screener_context.get("market_cap_cr") is not None:
             cap = screener_context.get("market_cap_cr")
-            # ELITE FIX: Robust cap safety validation
             if cap is not None and cap > 0:
                 print(f"Market Cap (via Screener): ₹{cap:.0f} Cr")
                 return cap < MICROCAP_LIMIT_CR
@@ -489,18 +480,12 @@ def get_pead_grade(score):
 # TELEGRAM & DASHBOARD
 # =========================================================
 def send_telegram_message(msg):
-        url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_TOKEN}/sendMessage"
-    )
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
     try: requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
     except Exception as e: print("Telegram Msg Error:", e)
 
 def send_telegram_photo(image_bytes, caption):
-        url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_TOKEN}/sendPhoto"
-    )
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendPhoto"
     try:
         response = requests.post(
             url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
@@ -539,7 +524,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v11.2 (URL & CAP SAFETY)")
+    print("🚀 GPT PEAD ENGINE v11.3 (CLEAN URL MASTER)")
     print("=" * 60)
 
     cycle = 0
@@ -575,12 +560,7 @@ def main():
                     ticker = None
                     entry_price = 0
 
-                # ELITE FIX: Clean string formatting ensures requests adapter parses schema perfectly
-                pdf_url = (
-                    "https://www.bseindia.com/"
-                    "xml-data/corpfiling/AttachLive/"
-                    + attachment
-                )
+                pdf_url = f"[https://www.bseindia.com/xml-data/corpfiling/AttachLive/](https://www.bseindia.com/xml-data/corpfiling/AttachLive/){attachment}"
                 
                 pdf_bytes = download_pdf(pdf_url)
                 if not pdf_bytes: continue
