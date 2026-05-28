@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v11.3 (CLEAN URL MASTER)
+# INSTITUTIONAL GPT PEAD ENGINE v11.4 (FINAL MASTER)
 # =========================================================
 
 import io
@@ -157,7 +157,7 @@ def update_ticker_cache(company_name, symbol):
 def get_screener_context(bse_code):
     if not bse_code or len(bse_code) != 6: return None
     try:
-        url = f"https://www.screener.in/company/{bse_code}/"
+        url = "https://www.screener.in/company/" + str(bse_code) + "/"
         headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
 
@@ -480,12 +480,14 @@ def get_pead_grade(score):
 # TELEGRAM & DASHBOARD
 # =========================================================
 def send_telegram_message(msg):
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
-    try: requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
-    except Exception as e: print("Telegram Msg Error:", e)
+    url = "[https://api.telegram.org/bot](https://api.telegram.org/bot)" + str(TELEGRAM_TOKEN) + "/sendMessage"
+    try: 
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
+    except Exception as e: 
+        print("Telegram Msg Error:", e)
 
 def send_telegram_photo(image_bytes, caption):
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendPhoto"
+    url = "[https://api.telegram.org/bot](https://api.telegram.org/bot)" + str(TELEGRAM_TOKEN) + "/sendPhoto"
     try:
         response = requests.post(
             url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
@@ -524,7 +526,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v11.3 (CLEAN URL MASTER)")
+    print("🚀 GPT PEAD ENGINE v11.4 (FINAL MASTER)")
     print("=" * 60)
 
     cycle = 0
@@ -560,7 +562,7 @@ def main():
                     ticker = None
                     entry_price = 0
 
-                pdf_url = f"[https://www.bseindia.com/xml-data/corpfiling/AttachLive/](https://www.bseindia.com/xml-data/corpfiling/AttachLive/){attachment}"
+                pdf_url = "[https://www.bseindia.com/xml-data/corpfiling/AttachLive/](https://www.bseindia.com/xml-data/corpfiling/AttachLive/)" + str(attachment)
                 
                 pdf_bytes = download_pdf(pdf_url)
                 if not pdf_bytes: continue
