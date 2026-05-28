@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v10.2 (MASTER + AUTO-CACHE)
+# INSTITUTIONAL GPT PEAD ENGINE v10.3 (SOFT DEGRADATION)
 # =========================================================
 
 import io
@@ -27,7 +27,7 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
 
-OPENAI_API_KEY = "code"
+OPENAI_API_KEY = "QO2JzjPdqmKUS4A"
 
 CHECK_INTERVAL = 60
 DB_NAME = "pead_results.db"
@@ -197,14 +197,16 @@ def get_live_stock_data(company_name, scrip_cd=""):
         clean_name = clean_name_for_search(company_name)
         search = yf.Search(clean_name + " NSE")
         if search.quotes:
-            symbol = search.quotes[0]["symbol"]
-            if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
-                symbol += ".NS"
-            stock = yf.Ticker(symbol)
-            hist = stock.history(period="1d")
-            if not hist.empty:
-                update_ticker_cache(company_name, symbol)
-                return symbol, hist['Close'].iloc[-1]
+            # ELITE FIX: Defensive dictionary .get() access
+            symbol = search.quotes[0].get("symbol")
+            if symbol:
+                if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
+                    symbol += ".NS"
+                stock = yf.Ticker(symbol)
+                hist = stock.history(period="1d")
+                if not hist.empty:
+                    update_ticker_cache(company_name, symbol)
+                    return symbol, hist['Close'].iloc[-1]
 
         # 4. YAHOO BSE SYMBOL LAST
         if scrip_cd and len(scrip_cd) == 6:
@@ -466,7 +468,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v10.2 (PRODUCTION MASTER)")
+    print("🚀 GPT PEAD ENGINE v10.3 (SOFT DEGRADATION)")
     print("=" * 60)
 
     cycle = 0
@@ -495,9 +497,12 @@ def main():
                     continue
 
                 ticker, entry_price = get_live_stock_data(company, scrip_cd)
+                
+                # ELITE FIX: Soft degradation instead of hard skip
                 if not ticker:
-                    print("❌ Could not map Ticker. Skipping.")
-                    continue
+                    print("⚠️ Ticker unavailable. Continuing fundamental PEAD only.")
+                    ticker = None
+                    entry_price = 0
 
                 pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}"
                 pdf_bytes = download_pdf(pdf_url)
