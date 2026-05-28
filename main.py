@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v10.4 (BS4 SCREENER RESOLVER)
+# INSTITUTIONAL GPT PEAD ENGINE v10.6 (TURNAROUND MASTER)
 # =========================================================
 
 import io
@@ -23,12 +23,16 @@ from PIL import Image, ImageDraw, ImageFont
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 # =========================================================
-# CONFIG
+# SECURE CONFIGURATION
 # =========================================================
-TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
-TELEGRAM_CHAT_ID = "7630276313"
+# Keys are now securely pulled from the server environment
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-OPENAI_API_KEY = ""
+if not OPENAI_API_KEY:
+    print("CRITICAL ERROR: OPENAI_API_KEY environment variable is missing.")
+    exit(1)
 
 CHECK_INTERVAL = 60
 DB_NAME = "pead_results.db"
@@ -151,13 +155,10 @@ def update_ticker_cache(company_name, symbol):
     except Exception as e:
         print("Cache Save Error:", e)
 
-# =========================================================
-# SCREENER BSE -> NSE SYMBOL RESOLVER
-# =========================================================
 def get_symbol_from_screener_bse(bse_code):
     try:
         url = f"https://www.screener.in/company/{bse_code}/"
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        headers = {"User-Agent": "Mozilla/5.0"}
         response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code != 200:
@@ -185,7 +186,6 @@ def clean_name_for_search(company_name):
 
 def get_live_stock_data(company_name, scrip_cd=""):
     try:
-        # 1. MANUAL CACHE FIRST
         ticker_cache = load_ticker_master()
         for cached_name, symbol in ticker_cache.items():
             if cached_name.lower() in company_name.lower() or company_name.lower() in cached_name.lower():
@@ -193,7 +193,6 @@ def get_live_stock_data(company_name, scrip_cd=""):
                 hist = stock.history(period="1d")
                 if not hist.empty: return symbol, hist['Close'].iloc[-1]
 
-        # 2. SCREENER LOOKUP SECOND
         if scrip_cd:
             nse_symbol = get_symbol_from_screener_bse(scrip_cd)
             if nse_symbol:
@@ -203,7 +202,6 @@ def get_live_stock_data(company_name, scrip_cd=""):
                     update_ticker_cache(company_name, nse_symbol)
                     return nse_symbol, hist['Close'].iloc[-1]
 
-        # 3. YAHOO NSE SEARCH THIRD
         clean_name = clean_name_for_search(company_name)
         search = yf.Search(clean_name + " NSE")
         if search.quotes:
@@ -217,7 +215,6 @@ def get_live_stock_data(company_name, scrip_cd=""):
                     update_ticker_cache(company_name, symbol)
                     return symbol, hist['Close'].iloc[-1]
 
-        # 4. YAHOO BSE SYMBOL LAST
         if scrip_cd and len(scrip_cd) == 6:
             bse_symbol = f"{scrip_cd}.BO"
             stock = yf.Ticker(bse_symbol)
@@ -227,7 +224,6 @@ def get_live_stock_data(company_name, scrip_cd=""):
                 return bse_symbol, hist['Close'].iloc[-1]
 
         return None, 0.0
-
     except Exception:
         return None, 0.0
 
@@ -245,7 +241,6 @@ def is_microcap(company_name, scrip_cd=""):
             
         market_cap_cr = market_cap / 10000000
         print(f"Market Cap: ₹{market_cap_cr:.0f} Cr")
-        
         return market_cap_cr < MICROCAP_LIMIT_CR
     except Exception as e:
         print(f"Microcap Check Error for {company_name}:", e)
@@ -392,7 +387,9 @@ def identify_theme_and_score(sector, industry):
         "EMS & Electronics": {"keywords": ["ems", "electronics", "semiconductor", "technology"], "score": 8},
         "Healthcare & Pharma": {"keywords": ["pharma", "healthcare", "api", "hospitals"], "score": 5},
         "IT & Software": {"keywords": ["it", "software"], "score": 4},
-        "Financials": {"keywords": ["bank", "nbfc", "finance"], "score": 3}
+        "Financials": {"keywords": ["bank", "nbfc", "finance"], "score": 3},
+        # NEW ELITE ADDITION: Chemicals & Cyclicals
+        "Chemicals & Fertilizers": {"keywords": ["chemical", "fertilizer", "fertiliser", "specialty chemical", "agrochemical", "industrial gas", "petrochemical"], "score": 8}
     }
     for theme_name, t_data in themes.items():
         if any(kw in text for kw in t_data["keywords"]):
@@ -405,23 +402,29 @@ def calculate_pead(data, theme_score):
     pat_growth = data.get("pat_yoy_growth_pct") or 0
     qoq_growth = data.get("pat_qoq_growth_pct") or 0
 
-    if abs(rev_growth) > 300: rev_growth = 0
-    if abs(pat_growth) > 500: pat_growth = 0
-    if abs(qoq_growth) > 300: qoq_growth = 0
+    # ELITE FIX: Cap outliers instead of zeroing them, preserving turnaround momentum
+    rev_growth = max(min(rev_growth, 300), -300)
+    pat_growth = max(min(pat_growth, 500), -500)
+    qoq_growth = max(min(qoq_growth, 300), -300)
 
+    # Revenue
     if rev_growth > 50: score += 20
     elif rev_growth > 30: score += 15
     elif rev_growth > 15: score += 10
     elif rev_growth > 8: score += 5
 
+    # PAT
     if pat_growth > 100: score += 30
     elif pat_growth > 50: score += 25
     elif pat_growth > 20: score += 15
     elif pat_growth > 10: score += 5
 
-    if qoq_growth > 40: score += 15
+    # QoQ (Turnaround & Momentum)
+    if qoq_growth > 100: score += 20  # ELITE UPGRADE: Mega Turnaround Bonus
+    elif qoq_growth > 40: score += 15
     elif qoq_growth > 15: score += 10
 
+    # EBITDA
     if (data.get("ebitda_margin_pct") or 0) > 25: score += 10
     elif (data.get("ebitda_margin_pct") or 0) > 18: score += 5
 
@@ -486,7 +489,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v10.4 (BS4 SCREENER RESOLVER)")
+    print("🚀 GPT PEAD ENGINE v10.6 (TURNAROUND MASTER)")
     print("=" * 60)
 
     cycle = 0
