@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v11.5 (FINAL PRODUCTION)
+# INSTITUTIONAL GPT PEAD ENGINE v12.0 (THE 10/10 MASTER)
 # =========================================================
 
 import io
@@ -325,24 +325,40 @@ def download_pdf(pdf_url):
         return None
 
 def extract_financial_pages(pdf_bytes):
-    keywords = [
-        "revenue from operations", "statement of audited financial results",
-        "profit for the period", "profit before tax", "ebitda",
-        "net profit", "total income", "financial results",
-        "income from operations", "results for the quarter"
-    ]
+    # ELITE FIX: Two-pass system to prevent missing deep consolidated tables
+    conso_keywords = ["consolidated financial results", "audited consolidated"]
+    base_keywords = ["revenue from operations", "profit for the period", "financial results"]
+    
     extracted_text = ""
+    conso_found = False
+    
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            # PASS 1: Hunt specifically for the word "Consolidated"
             for idx, page in enumerate(pdf.pages):
                 text = page.extract_text()
                 if not text: continue
-                if any(k in text.lower() for k in keywords):
-                    print(f"✅ Financial Page Detected: Page {idx+1}")
+                
+                if any(k in text.lower() for k in conso_keywords):
+                    print(f"✅ Priority Consolidated Page Detected: Page {idx+1}")
                     extracted_text += text
+                    conso_found = True
                     if len(extracted_text) > 25000: break
+            
+            # PASS 2: If no Consolidated section exists, fall back to standard
+            if not conso_found:
+                print("⚠️ No explicit consolidated headers. Parsing standard financial sheets.")
+                for idx, page in enumerate(pdf.pages):
+                    text = page.extract_text()
+                    if not text: continue
+                    if any(k in text.lower() for k in base_keywords):
+                        print(f"✅ Financial Page Detected: Page {idx+1}")
+                        extracted_text += text
+                        if len(extracted_text) > 25000: break
+                        
     except Exception as e:
         print("PDF Extraction Error:", e)
+        
     return extracted_text
 
 def gpt_extract_with_context(pdf_text, company_name, screener_context):
@@ -358,52 +374,72 @@ Quarterly Historical Data:
 """
 
         prompt = f"""
-        You are an institutional PEAD analyst.
+        You are a ruthless, highly precise institutional PEAD analyst.
         Use BOTH current quarter PDF and historical Screener quarterly data to evaluate structural performance trends.
-        Strictly extract from the CONSOLIDATED financial results table. Ignore Standalone results unless Consolidated is completely unavailable.
+        
+        RULES:
+        1. CONSOLIDATED ONLY: Strictly extract from CONSOLIDATED results. Ignore Standalone unless Consolidated literally does not exist.
+        2. STRICT SIGNS: If profit or revenue decreased, the percentage MUST be negative (e.g., -15.4).
+        3. NO HALLUCINATION: If a metric is completely missing, return null. Do not calculate it yourself unless the base numbers are explicitly clear.
         
         Evaluate:
         - acceleration, slowdown, or turnaround scenarios
         - operational leverage & margin expansion stability
-        
-        Do NOT hallucinate values. If PAT or revenue is unavailable, return null. Return STRICT JSON only.
 
         {history_text}
 
         CURRENT PDF:
         {pdf_text[:15000]}
-
-        Required JSON format:
-        {{
-            "company_name": "",
-            "quarter": "",
-            "sector": "",
-            "industry": "",
-            "revenue_yoy_growth_pct": null,
-            "pat_yoy_growth_pct": null,
-            "pat_qoq_growth_pct": null,
-            "ebitda_margin_pct": null,
-            "management_commentary": "",
-            "order_book": "",
-            "red_flags": "",
-            "earnings_quality": "",
-            "turnaround_signal": "",
-            "acceleration_signal": ""
-        }}
         """
+
+        # ELITE UPGRADE: Structured Outputs for 100% Deterministic Extraction
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.1
+            temperature=0.0,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "pead_extraction",
+                    "strict": True,
+                    "schema": {
+                        "type": "object",
+                        "properties": {
+                            "company_name": {"type": "string"},
+                            "quarter": {"type": "string"},
+                            "sector": {"type": "string"},
+                            "industry": {"type": "string"},
+                            "revenue_yoy_growth_pct": {"type": ["number", "null"]},
+                            "pat_yoy_growth_pct": {"type": ["number", "null"]},
+                            "pat_qoq_growth_pct": {"type": ["number", "null"]},
+                            "ebitda_margin_pct": {"type": ["number", "null"]},
+                            "management_commentary": {"type": "string"},
+                            "order_book": {"type": "string"},
+                            "red_flags": {"type": "string"},
+                            "earnings_quality": {"type": "string"},
+                            "turnaround_signal": {"type": "string"},
+                            "acceleration_signal": {"type": "string"}
+                        },
+                        "required": [
+                            "company_name", "quarter", "sector", "industry", 
+                            "revenue_yoy_growth_pct", "pat_yoy_growth_pct", 
+                            "pat_qoq_growth_pct", "ebitda_margin_pct", 
+                            "management_commentary", "order_book", "red_flags", 
+                            "earnings_quality", "turnaround_signal", "acceleration_signal"
+                        ],
+                        "additionalProperties": False
+                    }
+                }
+            }
         )
-        raw = response.choices[0].message.content.strip()
-        if raw.startswith("```json"):
-            raw = raw.replace("```json", "").replace("```", "")
         
+        raw = response.choices[0].message.content
         data = json.loads(raw)
+        
         print("\n🔍 DEBUG: RAW EXTRACTED DATA")
         print(json.dumps(data, indent=2))
         return data
+        
     except Exception as e:
         print("GPT Extraction Error:", e)
         return None
@@ -481,8 +517,9 @@ def get_pead_grade(score):
 # =========================================================
 def send_telegram_message(msg):
     url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_TOKEN}/sendMessage"
+        "https://api.telegram.org/bot"
+        + str(TELEGRAM_TOKEN)
+        + "/sendMessage"
     )
     try:
         requests.post(
@@ -498,8 +535,9 @@ def send_telegram_message(msg):
 
 def send_telegram_photo(image_bytes, caption):
     url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_TOKEN}/sendPhoto"
+        "https://api.telegram.org/bot"
+        + str(TELEGRAM_TOKEN)
+        + "/sendPhoto"
     )
     try:
         response = requests.post(
@@ -550,7 +588,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v11.5 (FINAL PRODUCTION)")
+    print("🚀 GPT PEAD ENGINE v12.0 (THE 10/10 MASTER)")
     print("=" * 60)
 
     cycle = 0
