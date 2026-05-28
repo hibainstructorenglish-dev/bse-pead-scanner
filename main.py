@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v10.6 (TURNAROUND MASTER)
+# INSTITUTIONAL GPT PEAD ENGINE v11.1 (OBSERVABILITY MASTER)
 # =========================================================
 
 import io
@@ -25,7 +25,6 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 # =========================================================
 # SECURE CONFIGURATION
 # =========================================================
-# Keys are now securely pulled from the server environment
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -133,7 +132,7 @@ def update_future_returns():
         print("Update Returns Error:", e)
 
 # =========================================================
-# DYNAMIC CACHE & TICKER ROUTING
+# DYNAMIC CACHE & SCREENER CONTEXT PROCESSING
 # =========================================================
 TICKER_MASTER_FILE = "ticker_master.json"
 
@@ -142,8 +141,8 @@ def load_ticker_master():
         try:
             with open(TICKER_MASTER_FILE, "r") as f:
                 return json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            print("Load Cache Error:", e)
     return {}
 
 def update_ticker_cache(company_name, symbol):
@@ -155,7 +154,8 @@ def update_ticker_cache(company_name, symbol):
     except Exception as e:
         print("Cache Save Error:", e)
 
-def get_symbol_from_screener_bse(bse_code):
+def get_screener_context(bse_code):
+    if not bse_code or len(bse_code) != 6: return None
     try:
         url = f"https://www.screener.in/company/{bse_code}/"
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -167,15 +167,42 @@ def get_symbol_from_screener_bse(bse_code):
         soup = BeautifulSoup(response.text, "html.parser")
         text = soup.get_text(" ", strip=True)
 
-        match = re.search(r'NSE:\s*([A-Z0-9]+)', text)
-        if match:
-            symbol = match.group(1)
-            print(f"✅ Screener NSE Found: {symbol}")
-            return symbol + ".NS"
+        # 1. NSE SYMBOL EXTRACTION
+        nse_match = re.search(r'NSE\s*:\s*([A-Z0-9\-]+)', text, re.IGNORECASE)
+        nse_symbol = None
+        if nse_match:
+            nse_symbol = nse_match.group(1).strip() + ".NS"
 
-        return None
+        # 2. MARKET CAP EXTRACTION
+        market_cap_match = re.search(r'Market Cap\s*₹\s*([\d,\.]+)', text)
+        market_cap_cr = 0
+        if market_cap_match:
+            market_cap_cr = float(market_cap_match.group(1).replace(",", ""))
+
+        # 3. QUARTERLY HISTORICAL DATA TRACKING (ELITE ROBUST PARSING)
+        quarterly_data = []
+        tables = soup.find_all("table")
+        for table in tables:
+            table_text = table.get_text(" ", strip=True).lower()
+            
+            if "sales" in table_text and "profit" in table_text:
+                rows = table.find_all("tr")
+                parsed_rows = []
+                for row in rows:
+                    cols = row.find_all(["td", "th"])
+                    cols_text = [c.get_text(strip=True) for c in cols]
+                    if cols_text:
+                        parsed_rows.append(cols_text)
+                quarterly_data = parsed_rows
+                break
+
+        return {
+            "nse_symbol": nse_symbol,
+            "market_cap_cr": market_cap_cr,
+            "quarterly_data": quarterly_data
+        }
     except Exception as e:
-        print("Screener Resolver Error:", e)
+        print("Screener Context Error:", e)
         return None
 
 def clean_name_for_search(company_name):
@@ -184,8 +211,9 @@ def clean_name_for_search(company_name):
     words = name.split()
     return " ".join(words[:3]).strip()
 
-def get_live_stock_data(company_name, scrip_cd=""):
+def get_live_stock_data(company_name, screener_context):
     try:
+        # 1. LOCAL CACHE MATCHING
         ticker_cache = load_ticker_master()
         for cached_name, symbol in ticker_cache.items():
             if cached_name.lower() in company_name.lower() or company_name.lower() in cached_name.lower():
@@ -193,15 +221,16 @@ def get_live_stock_data(company_name, scrip_cd=""):
                 hist = stock.history(period="1d")
                 if not hist.empty: return symbol, hist['Close'].iloc[-1]
 
-        if scrip_cd:
-            nse_symbol = get_symbol_from_screener_bse(scrip_cd)
-            if nse_symbol:
-                stock = yf.Ticker(nse_symbol)
-                hist = stock.history(period="1d")
-                if not hist.empty:
-                    update_ticker_cache(company_name, nse_symbol)
-                    return nse_symbol, hist['Close'].iloc[-1]
+        # 2. USE POPULATED SCREENER SYMBOL DIRECTLY
+        if screener_context and screener_context.get("nse_symbol"):
+            nse_symbol = screener_context.get("nse_symbol")
+            stock = yf.Ticker(nse_symbol)
+            hist = stock.history(period="1d")
+            if not hist.empty:
+                update_ticker_cache(company_name, nse_symbol)
+                return nse_symbol, hist['Close'].iloc[-1]
 
+        # 3. FUZZY YAHOO TEXT SEARCH AS THIRD LAYER
         clean_name = clean_name_for_search(company_name)
         search = yf.Search(clean_name + " NSE")
         if search.quotes:
@@ -215,35 +244,33 @@ def get_live_stock_data(company_name, scrip_cd=""):
                     update_ticker_cache(company_name, symbol)
                     return symbol, hist['Close'].iloc[-1]
 
-        if scrip_cd and len(scrip_cd) == 6:
-            bse_symbol = f"{scrip_cd}.BO"
-            stock = yf.Ticker(bse_symbol)
-            hist = stock.history(period="1d")
-            if not hist.empty:
-                update_ticker_cache(company_name, bse_symbol)
-                return bse_symbol, hist['Close'].iloc[-1]
-
         return None, 0.0
-    except Exception:
+    except Exception as e:
+        print("Live Data Fetch Error:", e)
         return None, 0.0
 
-def is_microcap(company_name, scrip_cd=""):
+def is_microcap(company_name, screener_context):
     try:
-        symbol, _ = get_live_stock_data(company_name, scrip_cd)
+        # Use Screener Cap metadata first to drop redundant network traffic
+        if screener_context and screener_context.get("market_cap_cr") is not None:
+            cap = screener_context.get("market_cap_cr")
+            if cap > 0:
+                print(f"Market Cap (via Screener): ₹{cap:.0f} Cr")
+                return cap < MICROCAP_LIMIT_CR
+
+        symbol, _ = get_live_stock_data(company_name, screener_context)
         if not symbol: return False
         
         stock = yf.Ticker(symbol)
         market_cap = stock.info.get("marketCap")
-        
         if not market_cap or market_cap <= 0:
-            print(f"⚠️ Market Cap data missing for {symbol}. Bypassing microcap filter.")
             return False
             
         market_cap_cr = market_cap / 10000000
-        print(f"Market Cap: ₹{market_cap_cr:.0f} Cr")
+        print(f"Market Cap (via yFinance): ₹{market_cap_cr:.0f} Cr")
         return market_cap_cr < MICROCAP_LIMIT_CR
     except Exception as e:
-        print(f"Microcap Check Error for {company_name}:", e)
+        print("Microcap Check Error:", e)
         return False
 
 # =========================================================
@@ -274,7 +301,8 @@ def get_technical_bonus(ticker):
         if current_price > dma: bonus += 3
 
         return bonus
-    except Exception:
+    except Exception as e:
+        print("Technical Bonus Error:", e)
         return 0
 
 # =========================================================
@@ -290,7 +318,8 @@ def fetch_latest_results():
     url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w"
     try:
         return session.get(url, params=params, timeout=20).json().get("Table", [])
-    except Exception:
+    except Exception as e:
+        print("BSE Fetch Error:", e)
         return []
 
 def download_pdf(pdf_url):
@@ -298,7 +327,8 @@ def download_pdf(pdf_url):
         response = session.get(pdf_url, timeout=20)
         response.raise_for_status()
         return response.content
-    except Exception:
+    except Exception as e:
+        print("PDF Download Error:", e)
         return None
 
 def extract_financial_pages(pdf_bytes):
@@ -318,52 +348,71 @@ def extract_financial_pages(pdf_bytes):
                     print(f"✅ Financial Page Detected: Page {idx+1}")
                     extracted_text += text
                     if len(extracted_text) > 25000: break
-    except Exception:
-        pass
+    except Exception as e:
+        print("PDF Extraction Error:", e)
     return extracted_text
 
-def gpt_extract(financial_text):
-    prompt = f"""
-    Extract latest quarterly earnings.
-    Strictly extract from the CONSOLIDATED financial results table. Ignore Standalone results unless Consolidated is completely unavailable.
-    Return ONLY valid JSON.
-    Use null if unavailable.
-    Infer likely sector and industry from company operations.
-    PAT / Net Profit extraction is extremely important.
-    If PAT exists anywhere in tables, extract it.
-    Never silently omit PAT.
-    Summarize management commentary in 1 sentence.
-
-    Return:
-    {{
-        "company_name": "",
-        "quarter": "",
-        "sector": "",
-        "industry": "",
-        "revenue_yoy_growth_pct": null,
-        "pat_yoy_growth_pct": null,
-        "pat_qoq_growth_pct": null,
-        "ebitda_margin_pct": null,
-        "management_commentary": "",
-        "order_book": "",
-        "red_flags": ""
-    }}
-
-    DOCUMENT:
-    {financial_text[:25000]}
-    """
+def gpt_extract_with_context(pdf_text, company_name, screener_context):
     try:
+        history_text = ""
+        if screener_context:
+            history_text = f"""
+SCREENER HISTORICAL CONTEXT
+NSE Symbol: {screener_context.get('nse_symbol')}
+Market Cap: {screener_context.get('market_cap_cr')} Cr
+Quarterly Historical Data:
+{screener_context.get('quarterly_data')}
+"""
+
+        prompt = f"""
+        You are an institutional PEAD analyst.
+        Use BOTH current quarter PDF and historical Screener quarterly data to evaluate structural performance trends.
+        Strictly extract from the CONSOLIDATED financial results table. Ignore Standalone results unless Consolidated is completely unavailable.
+        
+        Evaluate:
+        - acceleration, slowdown, or turnaround scenarios
+        - operational leverage & margin expansion stability
+        
+        Do NOT hallucinate values. If PAT or revenue is unavailable, return null. Return STRICT JSON only.
+
+        {history_text}
+
+        CURRENT PDF:
+        {pdf_text[:15000]}
+
+        Required JSON format:
+        {{
+            "company_name": "",
+            "quarter": "",
+            "sector": "",
+            "industry": "",
+            "revenue_yoy_growth_pct": null,
+            "pat_yoy_growth_pct": null,
+            "pat_qoq_growth_pct": null,
+            "ebitda_margin_pct": null,
+            "management_commentary": "",
+            "order_book": "",
+            "red_flags": "",
+            "earnings_quality": "",
+            "turnaround_signal": "",
+            "acceleration_signal": ""
+        }}
+        """
         response = client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a financial extraction engine."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.1
         )
-        content = response.choices[0].message.content.replace("```json", "").replace("```", "")
-        return json.loads(content)
-    except Exception:
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```json"):
+            raw = raw.replace("```json", "").replace("```", "")
+        
+        data = json.loads(raw)
+        print("\n🔍 DEBUG: RAW EXTRACTED DATA")
+        print(json.dumps(data, indent=2))
+        return data
+    except Exception as e:
+        print("GPT Extraction Error:", e)
         return None
 
 # =========================================================
@@ -388,7 +437,6 @@ def identify_theme_and_score(sector, industry):
         "Healthcare & Pharma": {"keywords": ["pharma", "healthcare", "api", "hospitals"], "score": 5},
         "IT & Software": {"keywords": ["it", "software"], "score": 4},
         "Financials": {"keywords": ["bank", "nbfc", "finance"], "score": 3},
-        # NEW ELITE ADDITION: Chemicals & Cyclicals
         "Chemicals & Fertilizers": {"keywords": ["chemical", "fertilizer", "fertiliser", "specialty chemical", "agrochemical", "industrial gas", "petrochemical"], "score": 8}
     }
     for theme_name, t_data in themes.items():
@@ -402,29 +450,24 @@ def calculate_pead(data, theme_score):
     pat_growth = data.get("pat_yoy_growth_pct") or 0
     qoq_growth = data.get("pat_qoq_growth_pct") or 0
 
-    # ELITE FIX: Cap outliers instead of zeroing them, preserving turnaround momentum
     rev_growth = max(min(rev_growth, 300), -300)
     pat_growth = max(min(pat_growth, 500), -500)
     qoq_growth = max(min(qoq_growth, 300), -300)
 
-    # Revenue
     if rev_growth > 50: score += 20
     elif rev_growth > 30: score += 15
     elif rev_growth > 15: score += 10
     elif rev_growth > 8: score += 5
 
-    # PAT
     if pat_growth > 100: score += 30
     elif pat_growth > 50: score += 25
     elif pat_growth > 20: score += 15
     elif pat_growth > 10: score += 5
 
-    # QoQ (Turnaround & Momentum)
-    if qoq_growth > 100: score += 20  # ELITE UPGRADE: Mega Turnaround Bonus
+    if qoq_growth > 100: score += 20  
     elif qoq_growth > 40: score += 15
     elif qoq_growth > 15: score += 10
 
-    # EBITDA
     if (data.get("ebitda_margin_pct") or 0) > 25: score += 10
     elif (data.get("ebitda_margin_pct") or 0) > 18: score += 5
 
@@ -444,21 +487,20 @@ def get_pead_grade(score):
 # TELEGRAM & DASHBOARD
 # =========================================================
 def send_telegram_message(msg):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
-    except Exception:
-        pass
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
+    try: requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
+    except Exception as e: print("Telegram Msg Error:", e)
 
 def send_telegram_photo(image_bytes, caption):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendPhoto"
     try:
         response = requests.post(
             url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
             files={"photo": ("dashboard.png", image_bytes, "image/png")}, timeout=30
         )
         return response.status_code == 200
-    except Exception:
+    except Exception as e: 
+        print("Telegram Photo Error:", e)
         return False
 
 def generate_dashboard(company_name, pead, theme, final_score):
@@ -489,7 +531,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v10.6 (TURNAROUND MASTER)")
+    print("🚀 GPT PEAD ENGINE v11.1 (OBSERVABILITY MASTER)")
     print("=" * 60)
 
     cycle = 0
@@ -513,18 +555,19 @@ def main():
 
                 print(f"\n{'=' * 60}\n🚀 NEW RESULT: {company}\n{'=' * 60}")
 
-                if is_microcap(company, scrip_cd):
+                screener_context = get_screener_context(scrip_cd)
+
+                if is_microcap(company, screener_context):
                     print(f"[REJECTED] {company} is a Microcap. Skipping.")
                     continue
 
-                ticker, entry_price = get_live_stock_data(company, scrip_cd)
-                
+                ticker, entry_price = get_live_stock_data(company, screener_context)
                 if not ticker:
                     print("⚠️ Ticker unavailable. Continuing fundamental PEAD only.")
                     ticker = None
                     entry_price = 0
 
-                pdf_url = f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{attachment}"
+                pdf_url = f"[https://www.bseindia.com/xml-data/corpfiling/AttachLive/](https://www.bseindia.com/xml-data/corpfiling/AttachLive/){attachment}"
                 pdf_bytes = download_pdf(pdf_url)
                 if not pdf_bytes: continue
 
@@ -533,13 +576,10 @@ def main():
                     print("❌ No Financial Data")
                     continue
 
-                data = gpt_extract(financial_text)
+                data = gpt_extract_with_context(financial_text, company, screener_context)
                 if not data:
                     print("❌ Extraction Failed entirely")
                     continue
-
-                print("\n🔍 DEBUG: RAW EXTRACTED DATA")
-                print(json.dumps(data, indent=2))
 
                 if not validate(data):
                     print("❌ Validation Failed (Missing/weak required metrics)")
@@ -572,21 +612,22 @@ def main():
                     f"Revenue YoY: {pead['rev_growth']:+.1f}%\n"
                     f"PAT YoY: {pead['pat_growth']:+.1f}%\n"
                     f"PAT QoQ: {pead['qoq_growth']:+.1f}%\n\n"
-                    f"EBITDA Margin: {data.get('ebitda_margin_pct') or 0}%\n\n"
-                    f"Theme: {theme}\n"
-                    f"Technical Bonus: +{tech_bonus}\n\n"
+                    f"Theme: {theme} | Tech Bonus: +{tech_bonus}\n"
                     f"Final PEAD Score: {final_score}\n\n"
-                    f"🧠 Sector: {data.get('sector')}\n"
-                    f"🏭 Industry: {data.get('industry')}"
+                    f"🧠 Sector: {data.get('sector')} | Industry: {data.get('industry')}"
                 )
 
                 print("📤 Sending Telegram Alert...")
                 if send_telegram_photo(dashboard, caption):
                     print("✅ PHOTO SENT")
                     commentary = (
-                        f"Commentary:\n\n{data.get('management_commentary', '')}\n\n"
-                        f"Order Book:\n\n{data.get('order_book', '')}\n\n"
-                        f"Red Flags:\n\n{data.get('red_flags', '')}"
+                        f"Commentary:\n{data.get('management_commentary', '')}\n\n"
+                        f"Metrics Context:\n"
+                        f"• Quality: {data.get('earnings_quality', 'N/A')}\n"
+                        f"• Turnaround: {data.get('turnaround_signal', 'N/A')}\n"
+                        f"• Acceleration: {data.get('acceleration_signal', 'N/A')}\n\n"
+                        f"Order Book: {data.get('order_book', 'N/A')}\n"
+                        f"Red Flags: {data.get('red_flags', 'N/A')}"
                     )
                     send_telegram_message(commentary)
 
