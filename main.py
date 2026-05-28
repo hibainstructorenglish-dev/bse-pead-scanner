@@ -228,10 +228,19 @@ def is_microcap(company_name, scrip_cd=""):
         if not symbol: return False
         
         stock = yf.Ticker(symbol)
-        market_cap_cr = stock.info.get("marketCap", 0) / 10000000
+        market_cap = stock.info.get("marketCap")
+        
+        # ELITE FIX: Bypass filter if Yahoo Finance data is missing or zero
+        if not market_cap or market_cap <= 0:
+            print(f"⚠️ Market Cap data missing for {symbol}. Bypassing microcap filter.")
+            return False
+            
+        market_cap_cr = market_cap / 10000000
         print(f"Market Cap: ₹{market_cap_cr:.0f} Cr")
+        
         return market_cap_cr < MICROCAP_LIMIT_CR
-    except Exception:
+    except Exception as e:
+        print(f"Microcap Check Error for {company_name}:", e)
         return False
 
 # =========================================================
