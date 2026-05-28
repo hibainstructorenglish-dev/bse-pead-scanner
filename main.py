@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v12.1 (THE TABLE PARSER)
+# INSTITUTIONAL GPT PEAD ENGINE v11.5 (FINAL PRODUCTION)
 # =========================================================
 
 import io
@@ -326,48 +326,24 @@ def download_pdf(pdf_url):
 
 def extract_financial_pages(pdf_bytes):
     keywords = [
-        "statement of consolidated financial results",
-        "revenue from operations",
-        "profit before tax",
-        "net profit after tax"
+        "revenue from operations", "statement of audited financial results",
+        "profit for the period", "profit before tax", "ebitda",
+        "net profit", "total income", "financial results",
+        "income from operations", "results for the quarter"
     ]
     extracted_text = ""
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
             for idx, page in enumerate(pdf.pages):
-                text = page.extract_text() or ""
-                lower_text = text.lower()
-
-                # SKIP AUDITOR REPORTS
-                if "independent auditor" in lower_text:
-                    continue
-
-                # ONLY FINANCIAL TABLE PAGES
-                if any(k in lower_text for k in keywords):
-                    print(f"✅ Financial Table Page: {idx+1}")
-                    extracted_text += "\n\n"
+                text = page.extract_text()
+                if not text: continue
+                if any(k in text.lower() for k in keywords):
+                    print(f"✅ Financial Page Detected: Page {idx+1}")
                     extracted_text += text
-
-                    # TABLE EXTRACTION - Native pipe-delimited structure for LLM alignment
-                    tables = page.extract_tables()
-                    if tables:
-                        for table in tables:
-                            for row in table:
-                                if row:
-                                    row_text = " | ".join(
-                                        [str(cell) for cell in row if cell]
-                                    )
-                                    extracted_text += "\n" + row_text
-                                    
-                    # Memory limit to prevent token blowout
-                    if len(extracted_text) > 25000:
-                        break
-
-        return extracted_text
-
+                    if len(extracted_text) > 25000: break
     except Exception as e:
         print("PDF Extraction Error:", e)
-        return ""
+    return extracted_text
 
 def gpt_extract_with_context(pdf_text, company_name, screener_context):
     try:
@@ -382,72 +358,52 @@ Quarterly Historical Data:
 """
 
         prompt = f"""
-        You are a ruthless, highly precise institutional PEAD analyst.
+        You are an institutional PEAD analyst.
         Use BOTH current quarter PDF and historical Screener quarterly data to evaluate structural performance trends.
-        
-        RULES:
-        1. CONSOLIDATED ONLY: Strictly extract from CONSOLIDATED results. Ignore Standalone unless Consolidated literally does not exist.
-        2. MANDATORY CALCULATION: Earnings tables usually provide raw absolute numbers (Current Qtr, Prev Qtr, Year-Ago Qtr) without writing the percentages. You MUST calculate the percentage growth yourself using the raw absolute figures. Formula: ((New - Old) / ABS(Old)) * 100.
-        3. STRICT SIGNS: If profit or revenue decreased, the percentage MUST be negative (e.g., -15.4).
-        4. NO HALLUCINATION: Only return null if the raw absolute numbers cannot be found anywhere in the text or tables.
+        Strictly extract from the CONSOLIDATED financial results table. Ignore Standalone results unless Consolidated is completely unavailable.
         
         Evaluate:
         - acceleration, slowdown, or turnaround scenarios
         - operational leverage & margin expansion stability
+        
+        Do NOT hallucinate values. If PAT or revenue is unavailable, return null. Return STRICT JSON only.
 
         {history_text}
 
         CURRENT PDF:
         {pdf_text[:15000]}
-        """
 
+        Required JSON format:
+        {{
+            "company_name": "",
+            "quarter": "",
+            "sector": "",
+            "industry": "",
+            "revenue_yoy_growth_pct": null,
+            "pat_yoy_growth_pct": null,
+            "pat_qoq_growth_pct": null,
+            "ebitda_margin_pct": null,
+            "management_commentary": "",
+            "order_book": "",
+            "red_flags": "",
+            "earnings_quality": "",
+            "turnaround_signal": "",
+            "acceleration_signal": ""
+        }}
+        """
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.0,
-            response_format={
-                "type": "json_schema",
-                "json_schema": {
-                    "name": "pead_extraction",
-                    "strict": True,
-                    "schema": {
-                        "type": "object",
-                        "properties": {
-                            "company_name": {"type": "string"},
-                            "quarter": {"type": "string"},
-                            "sector": {"type": "string"},
-                            "industry": {"type": "string"},
-                            "revenue_yoy_growth_pct": {"type": ["number", "null"]},
-                            "pat_yoy_growth_pct": {"type": ["number", "null"]},
-                            "pat_qoq_growth_pct": {"type": ["number", "null"]},
-                            "ebitda_margin_pct": {"type": ["number", "null"]},
-                            "management_commentary": {"type": "string"},
-                            "order_book": {"type": "string"},
-                            "red_flags": {"type": "string"},
-                            "earnings_quality": {"type": "string"},
-                            "turnaround_signal": {"type": "string"},
-                            "acceleration_signal": {"type": "string"}
-                        },
-                        "required": [
-                            "company_name", "quarter", "sector", "industry", 
-                            "revenue_yoy_growth_pct", "pat_yoy_growth_pct", 
-                            "pat_qoq_growth_pct", "ebitda_margin_pct", 
-                            "management_commentary", "order_book", "red_flags", 
-                            "earnings_quality", "turnaround_signal", "acceleration_signal"
-                        ],
-                        "additionalProperties": False
-                    }
-                }
-            }
+            temperature=0.1
         )
+        raw = response.choices[0].message.content.strip()
+        if raw.startswith("```json"):
+            raw = raw.replace("```json", "").replace("```", "")
         
-        raw = response.choices[0].message.content
         data = json.loads(raw)
-        
         print("\n🔍 DEBUG: RAW EXTRACTED DATA")
         print(json.dumps(data, indent=2))
         return data
-        
     except Exception as e:
         print("GPT Extraction Error:", e)
         return None
@@ -525,9 +481,8 @@ def get_pead_grade(score):
 # =========================================================
 def send_telegram_message(msg):
     url = (
-        "https://api.telegram.org/bot"
-        + str(TELEGRAM_TOKEN)
-        + "/sendMessage"
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendMessage"
     )
     try:
         requests.post(
@@ -543,9 +498,8 @@ def send_telegram_message(msg):
 
 def send_telegram_photo(image_bytes, caption):
     url = (
-        "https://api.telegram.org/bot"
-        + str(TELEGRAM_TOKEN)
-        + "/sendPhoto"
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendPhoto"
     )
     try:
         response = requests.post(
@@ -596,7 +550,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v12.1 (THE TABLE PARSER)")
+    print("🚀 GPT PEAD ENGINE v11.5 (FINAL PRODUCTION)")
     print("=" * 60)
 
     cycle = 0
@@ -669,7 +623,7 @@ def main():
                     continue
 
                 entry_date_str = datetime.now().strftime("%Y-%m-%d")
-                save_to_db(news_id, company, ticker, final_score, theme, entry_price, entry_date_str, pead['rev_growth'], pat_growth=pead['pat_growth'], qoq_growth=pead['qoq_growth'])
+                save_to_db(news_id, company, ticker, final_score, theme, entry_price, entry_date_str, pead['rev_growth'], pead['pat_growth'], pead['qoq_growth'])
 
                 dashboard = generate_dashboard(company, pead, theme, final_score)
                 grade = get_pead_grade(final_score)
