@@ -337,6 +337,18 @@ def extract_financial_pages(pdf_bytes):
             for idx, page in enumerate(pdf.pages):
                 text = page.extract_text()
                 if not text: continue
+                lower_text = text.lower()
+
+                # SKIP AUDITOR REPORTS
+                if "independent auditor" in lower_text:
+                    continue
+            
+                if any(k in lower_text for k in keywords):
+            
+                    print(f"✅ Financial Page Detected: Page {idx+1}")
+            
+                    extracted_text += text
+                
                 if any(k in text.lower() for k in keywords):
                     print(f"✅ Financial Page Detected: Page {idx+1}")
                     extracted_text += text
