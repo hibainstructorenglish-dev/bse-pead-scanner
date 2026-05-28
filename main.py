@@ -489,12 +489,18 @@ def get_pead_grade(score):
 # TELEGRAM & DASHBOARD
 # =========================================================
 def send_telegram_message(msg):
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendMessage"
+        url = (
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendMessage"
+    )
     try: requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
     except Exception as e: print("Telegram Msg Error:", e)
 
 def send_telegram_photo(image_bytes, caption):
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_TOKEN}/sendPhoto"
+        url = (
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendPhoto"
+    )
     try:
         response = requests.post(
             url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
@@ -570,7 +576,11 @@ def main():
                     entry_price = 0
 
                 # ELITE FIX: Clean string formatting ensures requests adapter parses schema perfectly
-                pdf_url = f"[https://www.bseindia.com/xml-data/corpfiling/AttachLive/](https://www.bseindia.com/xml-data/corpfiling/AttachLive/){attachment}"
+                pdf_url = (
+                    "https://www.bseindia.com/"
+                    "xml-data/corpfiling/AttachLive/"
+                    + attachment
+                )
                 
                 pdf_bytes = download_pdf(pdf_url)
                 if not pdf_bytes: continue
