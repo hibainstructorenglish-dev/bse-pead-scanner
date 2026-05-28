@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v11.4 (FINAL MASTER)
+# INSTITUTIONAL GPT PEAD ENGINE v11.5 (FINAL PRODUCTION)
 # =========================================================
 
 import io
@@ -480,21 +480,45 @@ def get_pead_grade(score):
 # TELEGRAM & DASHBOARD
 # =========================================================
 def send_telegram_message(msg):
-    url = "[https://api.telegram.org/bot](https://api.telegram.org/bot)" + str(TELEGRAM_TOKEN) + "/sendMessage"
-    try: 
-        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": msg[:3500]}, timeout=20)
-    except Exception as e: 
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendMessage"
+    )
+    try:
+        requests.post(
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": msg[:3500]
+            },
+            timeout=20
+        )
+    except Exception as e:
         print("Telegram Msg Error:", e)
 
 def send_telegram_photo(image_bytes, caption):
-    url = "[https://api.telegram.org/bot](https://api.telegram.org/bot)" + str(TELEGRAM_TOKEN) + "/sendPhoto"
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_TOKEN}/sendPhoto"
+    )
     try:
         response = requests.post(
-            url, data={"chat_id": TELEGRAM_CHAT_ID, "caption": caption[:1000]},
-            files={"photo": ("dashboard.png", image_bytes, "image/png")}, timeout=30
+            url,
+            data={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "caption": caption[:1000]
+            },
+            files={
+                "photo": (
+                    "dashboard.png",
+                    image_bytes,
+                    "image/png"
+                )
+            },
+            timeout=30
         )
         return response.status_code == 200
-    except Exception as e: 
+    except Exception as e:
         print("Telegram Photo Error:", e)
         return False
 
@@ -526,7 +550,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v11.4 (FINAL MASTER)")
+    print("🚀 GPT PEAD ENGINE v11.5 (FINAL PRODUCTION)")
     print("=" * 60)
 
     cycle = 0
@@ -562,7 +586,11 @@ def main():
                     ticker = None
                     entry_price = 0
 
-                pdf_url = "[https://www.bseindia.com/xml-data/corpfiling/AttachLive/](https://www.bseindia.com/xml-data/corpfiling/AttachLive/)" + str(attachment)
+                pdf_url = (
+                    "https://www.bseindia.com/"
+                    "xml-data/corpfiling/AttachLive/"
+                    + str(attachment)
+                )
                 
                 pdf_bytes = download_pdf(pdf_url)
                 if not pdf_bytes: continue
@@ -605,12 +633,17 @@ def main():
                     f"🎯 {company}\n\n"
                     f"{grade}\n\n"
                     f"📊 {quarter}\n\n"
-                    f"Revenue YoY: {pead['rev_growth']:+.1f}%\n"
-                    f"PAT YoY: {pead['pat_growth']:+.1f}%\n"
-                    f"PAT QoQ: {pead['qoq_growth']:+.1f}%\n\n"
-                    f"Theme: {theme} | Tech Bonus: +{tech_bonus}\n"
-                    f"Final PEAD Score: {final_score}\n\n"
-                    f"🧠 Sector: {data.get('sector')} | Industry: {data.get('industry')}"
+                    f"🏆 FINAL PEAD SCORE: {final_score}\n\n"
+                    f"⚡ Theme: {theme}\n"
+                    f"🏭 Sector: {data.get('sector')}\n"
+                    f"🏢 Industry: {data.get('industry')}\n\n"
+                    f"📈 REVENUE\n"
+                    f"YoY Growth: {pead['rev_growth']:+.1f}%\n\n"
+                    f"💰 PAT\n"
+                    f"YoY Growth: {pead['pat_growth']:+.1f}%\n"
+                    f"QoQ Growth: {pead['qoq_growth']:+.1f}%\n\n"
+                    f"📊 EBITDA Margin: {data.get('ebitda_margin_pct', 0)}%\n\n"
+                    f"📈 Technical Bonus: +{tech_bonus}"
                 )
 
                 print("📤 Sending Telegram Alert...")
