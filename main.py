@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v12.0 (THE 10/10 MASTER)
+# INSTITUTIONAL GPT PEAD ENGINE v12.1 (THE TABLE PARSER)
 # =========================================================
 
 import io
@@ -325,41 +325,49 @@ def download_pdf(pdf_url):
         return None
 
 def extract_financial_pages(pdf_bytes):
-    # ELITE FIX: Two-pass system to prevent missing deep consolidated tables
-    conso_keywords = ["consolidated financial results", "audited consolidated"]
-    base_keywords = ["revenue from operations", "profit for the period", "financial results"]
-    
+    keywords = [
+        "statement of consolidated financial results",
+        "revenue from operations",
+        "profit before tax",
+        "net profit after tax"
+    ]
     extracted_text = ""
-    conso_found = False
-    
     try:
         with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-            # PASS 1: Hunt specifically for the word "Consolidated"
             for idx, page in enumerate(pdf.pages):
-                text = page.extract_text()
-                if not text: continue
-                
-                if any(k in text.lower() for k in conso_keywords):
-                    print(f"✅ Priority Consolidated Page Detected: Page {idx+1}")
+                text = page.extract_text() or ""
+                lower_text = text.lower()
+
+                # SKIP AUDITOR REPORTS
+                if "independent auditor" in lower_text:
+                    continue
+
+                # ONLY FINANCIAL TABLE PAGES
+                if any(k in lower_text for k in keywords):
+                    print(f"✅ Financial Table Page: {idx+1}")
+                    extracted_text += "\n\n"
                     extracted_text += text
-                    conso_found = True
-                    if len(extracted_text) > 25000: break
-            
-            # PASS 2: If no Consolidated section exists, fall back to standard
-            if not conso_found:
-                print("⚠️ No explicit consolidated headers. Parsing standard financial sheets.")
-                for idx, page in enumerate(pdf.pages):
-                    text = page.extract_text()
-                    if not text: continue
-                    if any(k in text.lower() for k in base_keywords):
-                        print(f"✅ Financial Page Detected: Page {idx+1}")
-                        extracted_text += text
-                        if len(extracted_text) > 25000: break
-                        
+
+                    # TABLE EXTRACTION - Native pipe-delimited structure for LLM alignment
+                    tables = page.extract_tables()
+                    if tables:
+                        for table in tables:
+                            for row in table:
+                                if row:
+                                    row_text = " | ".join(
+                                        [str(cell) for cell in row if cell]
+                                    )
+                                    extracted_text += "\n" + row_text
+                                    
+                    # Memory limit to prevent token blowout
+                    if len(extracted_text) > 25000:
+                        break
+
+        return extracted_text
+
     except Exception as e:
         print("PDF Extraction Error:", e)
-        
-    return extracted_text
+        return ""
 
 def gpt_extract_with_context(pdf_text, company_name, screener_context):
     try:
@@ -379,8 +387,9 @@ Quarterly Historical Data:
         
         RULES:
         1. CONSOLIDATED ONLY: Strictly extract from CONSOLIDATED results. Ignore Standalone unless Consolidated literally does not exist.
-        2. STRICT SIGNS: If profit or revenue decreased, the percentage MUST be negative (e.g., -15.4).
-        3. NO HALLUCINATION: If a metric is completely missing, return null. Do not calculate it yourself unless the base numbers are explicitly clear.
+        2. MANDATORY CALCULATION: Earnings tables usually provide raw absolute numbers (Current Qtr, Prev Qtr, Year-Ago Qtr) without writing the percentages. You MUST calculate the percentage growth yourself using the raw absolute figures. Formula: ((New - Old) / ABS(Old)) * 100.
+        3. STRICT SIGNS: If profit or revenue decreased, the percentage MUST be negative (e.g., -15.4).
+        4. NO HALLUCINATION: Only return null if the raw absolute numbers cannot be found anywhere in the text or tables.
         
         Evaluate:
         - acceleration, slowdown, or turnaround scenarios
@@ -392,7 +401,6 @@ Quarterly Historical Data:
         {pdf_text[:15000]}
         """
 
-        # ELITE UPGRADE: Structured Outputs for 100% Deterministic Extraction
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
@@ -588,7 +596,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v12.0 (THE 10/10 MASTER)")
+    print("🚀 GPT PEAD ENGINE v12.1 (THE TABLE PARSER)")
     print("=" * 60)
 
     cycle = 0
@@ -661,7 +669,7 @@ def main():
                     continue
 
                 entry_date_str = datetime.now().strftime("%Y-%m-%d")
-                save_to_db(news_id, company, ticker, final_score, theme, entry_price, entry_date_str, pead['rev_growth'], pead['pat_growth'], pead['qoq_growth'])
+                save_to_db(news_id, company, ticker, final_score, theme, entry_price, entry_date_str, pead['rev_growth'], pat_growth=pead['pat_growth'], qoq_growth=pead['qoq_growth'])
 
                 dashboard = generate_dashboard(company, pead, theme, final_score)
                 grade = get_pead_grade(final_score)
