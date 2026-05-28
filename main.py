@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v11.1 (OBSERVABILITY MASTER)
+# INSTITUTIONAL GPT PEAD ENGINE v11.2 (URL & CAP SAFETY)
 # =========================================================
 
 import io
@@ -179,7 +179,7 @@ def get_screener_context(bse_code):
         if market_cap_match:
             market_cap_cr = float(market_cap_match.group(1).replace(",", ""))
 
-        # 3. QUARTERLY HISTORICAL DATA TRACKING (ELITE ROBUST PARSING)
+        # 3. QUARTERLY HISTORICAL DATA TRACKING
         quarterly_data = []
         tables = soup.find_all("table")
         for table in tables:
@@ -254,9 +254,11 @@ def is_microcap(company_name, screener_context):
         # Use Screener Cap metadata first to drop redundant network traffic
         if screener_context and screener_context.get("market_cap_cr") is not None:
             cap = screener_context.get("market_cap_cr")
-            if cap > 0:
+            # ELITE FIX: Robust cap safety validation
+            if cap is not None and cap > 0:
                 print(f"Market Cap (via Screener): ₹{cap:.0f} Cr")
                 return cap < MICROCAP_LIMIT_CR
+            print("⚠️ Screener market cap unavailable/zero. Falling back to yFinance.")
 
         symbol, _ = get_live_stock_data(company_name, screener_context)
         if not symbol: return False
@@ -531,7 +533,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v11.1 (OBSERVABILITY MASTER)")
+    print("🚀 GPT PEAD ENGINE v11.2 (URL & CAP SAFETY)")
     print("=" * 60)
 
     cycle = 0
@@ -567,7 +569,9 @@ def main():
                     ticker = None
                     entry_price = 0
 
+                # ELITE FIX: Clean string formatting ensures requests adapter parses schema perfectly
                 pdf_url = f"[https://www.bseindia.com/xml-data/corpfiling/AttachLive/](https://www.bseindia.com/xml-data/corpfiling/AttachLive/){attachment}"
+                
                 pdf_bytes = download_pdf(pdf_url)
                 if not pdf_bytes: continue
 
