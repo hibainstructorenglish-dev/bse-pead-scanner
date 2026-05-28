@@ -1,5 +1,5 @@
 # =========================================================
-# INSTITUTIONAL GPT PEAD ENGINE v10.3 (SOFT DEGRADATION)
+# INSTITUTIONAL GPT PEAD ENGINE v10.4 (BS4 SCREENER RESOLVER)
 # =========================================================
 
 import io
@@ -13,6 +13,7 @@ import logging
 import requests
 import pdfplumber
 import yfinance as yf
+from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 
 from openai import OpenAI
@@ -27,7 +28,7 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 TELEGRAM_TOKEN = "8841109141:AAHc002BrBRD3Y5-7pBRAKQgxPBRVkeGJ_U"
 TELEGRAM_CHAT_ID = "7630276313"
 
-OPENAI_API_KEY = "QO2JzjPdqmKUS4A"
+OPENAI_API_KEY = "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"
 
 CHECK_INTERVAL = 60
 DB_NAME = "pead_results.db"
@@ -150,22 +151,31 @@ def update_ticker_cache(company_name, symbol):
     except Exception as e:
         print("Cache Save Error:", e)
 
-def map_bse_to_nse_via_screener(scrip_cd):
-    if not scrip_cd or len(scrip_cd) != 6: return None
-    url = f"https://www.screener.in/company/{scrip_cd}/"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+# =========================================================
+# SCREENER BSE -> NSE SYMBOL RESOLVER
+# =========================================================
+def get_symbol_from_screener_bse(bse_code):
     try:
-        response = requests.get(url, headers=headers, timeout=5, allow_redirects=True)
-        final_url = response.url
-        if "company/" in final_url:
-            parts = final_url.split('/')
-            if len(parts) >= 5:
-                symbol = parts[4]
-                if not symbol.isdigit():
-                    return f"{symbol}.NS"
-    except Exception:
-        pass
-    return None
+        url = f"https://www.screener.in/company/{bse_code}/"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        response = requests.get(url, headers=headers, timeout=10)
+
+        if response.status_code != 200:
+            return None
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        text = soup.get_text(" ", strip=True)
+
+        match = re.search(r'NSE:\s*([A-Z0-9]+)', text)
+        if match:
+            symbol = match.group(1)
+            print(f"✅ Screener NSE Found: {symbol}")
+            return symbol + ".NS"
+
+        return None
+    except Exception as e:
+        print("Screener Resolver Error:", e)
+        return None
 
 def clean_name_for_search(company_name):
     name = re.sub(r'(?i)\b(ltd|limited|corp|corporation|inc|co)\b\.?', '', company_name)
@@ -185,7 +195,7 @@ def get_live_stock_data(company_name, scrip_cd=""):
 
         # 2. SCREENER LOOKUP SECOND
         if scrip_cd:
-            nse_symbol = map_bse_to_nse_via_screener(scrip_cd)
+            nse_symbol = get_symbol_from_screener_bse(scrip_cd)
             if nse_symbol:
                 stock = yf.Ticker(nse_symbol)
                 hist = stock.history(period="1d")
@@ -197,7 +207,6 @@ def get_live_stock_data(company_name, scrip_cd=""):
         clean_name = clean_name_for_search(company_name)
         search = yf.Search(clean_name + " NSE")
         if search.quotes:
-            # ELITE FIX: Defensive dictionary .get() access
             symbol = search.quotes[0].get("symbol")
             if symbol:
                 if not symbol.endswith(".NS") and not symbol.endswith(".BO"):
@@ -230,7 +239,6 @@ def is_microcap(company_name, scrip_cd=""):
         stock = yf.Ticker(symbol)
         market_cap = stock.info.get("marketCap")
         
-        # ELITE FIX: Bypass filter if Yahoo Finance data is missing or zero
         if not market_cap or market_cap <= 0:
             print(f"⚠️ Market Cap data missing for {symbol}. Bypassing microcap filter.")
             return False
@@ -322,6 +330,7 @@ def extract_financial_pages(pdf_bytes):
 def gpt_extract(financial_text):
     prompt = f"""
     Extract latest quarterly earnings.
+    Strictly extract from the CONSOLIDATED financial results table. Ignore Standalone results unless Consolidated is completely unavailable.
     Return ONLY valid JSON.
     Use null if unavailable.
     Infer likely sector and industry from company operations.
@@ -477,7 +486,7 @@ seen = set()
 def main():
     init_db()
     print("=" * 60)
-    print("🚀 GPT PEAD ENGINE v10.3 (SOFT DEGRADATION)")
+    print("🚀 GPT PEAD ENGINE v10.4 (BS4 SCREENER RESOLVER)")
     print("=" * 60)
 
     cycle = 0
@@ -507,7 +516,6 @@ def main():
 
                 ticker, entry_price = get_live_stock_data(company, scrip_cd)
                 
-                # ELITE FIX: Soft degradation instead of hard skip
                 if not ticker:
                     print("⚠️ Ticker unavailable. Continuing fundamental PEAD only.")
                     ticker = None
